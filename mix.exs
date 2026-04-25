@@ -30,7 +30,8 @@ defmodule Editor.Umbrella.MixProject do
   defp deps do
     [
       # Required for `mix format` to handle ~H/HEEx templates at umbrella root
-      {:phoenix_live_view, "~> 0.20", only: [:dev, :test], runtime: false}
+      # only: [:dev, :test], runtime: false}
+      {:phoenix_live_view, "~> 1.1.0"}
     ]
   end
 
