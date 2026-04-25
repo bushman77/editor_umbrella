@@ -237,9 +237,8 @@ defmodule EditorWeb.EditorLive do
       <main
         id="editor-shell"
         class="flex h-screen w-full"
+        phx-hook="EditorShell"
         data-selected-file-path={@selected_file || ""}
-        phx-hook="SelectedFileStorage"
-        phx-hook="LlmModalStorage"
         data-llm-modal-open={to_string(@llm_modal_open?)}
         data-llm-question={Phoenix.HTML.Form.input_value(@llm_form, :question) || ""}
         data-llm-response={@llm_response || ""}
@@ -338,19 +337,21 @@ defmodule EditorWeb.EditorLive do
 
           <div class="flex-1 overflow-hidden">
             <%= if @selected_file do %>
-              <.form
-                for={@editor_form}
-                id="editor-form"
-                phx-change="edit_file"
-                phx-submit="save_file"
-                class="h-full"
-              >
-                <textarea
-                  id="editor-textarea"
-                  name="editor[content]"
-                  class="h-full min-h-full w-full resize-none border-0 bg-base-100 px-4 py-4 font-mono text-sm leading-6 outline-none"
-                ><%= @file_content %></textarea>
-              </.form>
+              <div class="h-full">
+                <.form for={@editor_form} id="editor-form" phx-submit="save_file" class="hidden">
+                  <input type="hidden" name="editor[content]" value={@file_content} />
+                </.form>
+
+                <div
+                  id="code-editor"
+                  phx-hook="CodeEditor"
+                  phx-update="ignore"
+                  data-content={@file_content}
+                  data-path={@selected_file || ""}
+                  class="h-full"
+                >
+                </div>
+              </div>
             <% else %>
               <div
                 id="editor-empty-state"
@@ -833,19 +834,56 @@ defmodule EditorWeb.EditorLive do
       path ->
         case File.write(path, content) do
           :ok ->
-            {:noreply,
-             socket
-             |> assign(:file_content, content)
-             |> assign(:saved_content, content)
-             |> assign(:dirty?, false)
-             |> assign(:save_message, "Saved.")
-             |> assign(:error_message, nil)
-             |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))}
+            case format_file(path) do
+              {:ok, formatted_content} ->
+                {:noreply,
+                 socket
+                 |> assign(:file_content, formatted_content)
+                 |> assign(:saved_content, formatted_content)
+                 |> assign(:dirty?, false)
+                 |> assign(:save_message, "Saved and formatted.")
+                 |> assign(:error_message, nil)
+                 |> assign(:editor_form, to_form(%{"content" => formatted_content}, as: :editor))}
+
+              {:error, message} ->
+                {:noreply,
+                 socket
+                 |> assign(:file_content, content)
+                 |> assign(:saved_content, content)
+                 |> assign(:dirty?, false)
+                 |> assign(:save_message, "Saved.")
+                 |> assign(:error_message, message)
+                 |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))}
+            end
 
           {:error, reason} ->
             {:noreply,
              assign(socket, :error_message, "Could not save file: #{:file.format_error(reason)}")}
         end
+    end
+  end
+
+  defp format_file(path) do
+    Mix.Task.reenable("format")
+
+    task =
+      Task.async(fn ->
+        Mix.Task.run("format", [path])
+        File.read(path)
+      end)
+
+    case Task.yield(task, 30_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, formatted_content}} ->
+        {:ok, formatted_content}
+
+      {:ok, {:error, reason}} ->
+        {:error, "Saved, but could not reload formatted file: #{:file.format_error(reason)}"}
+
+      {:exit, reason} ->
+        {:error, "Saved, but mix format failed: #{Exception.format_exit(reason)}"}
+
+      nil ->
+        {:error, "Saved, but mix format timed out."}
     end
   end
 end

@@ -3,8 +3,79 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/editor_web"
 import topbar from "../vendor/topbar"
+import {EditorState} from "@codemirror/state"
+import {EditorView, keymap, lineNumbers, highlightActiveLineGutter} from "@codemirror/view"
+import {defaultKeymap, history, historyKeymap, indentWithTab} from "@codemirror/commands"
+import {syntaxHighlighting, defaultHighlightStyle, bracketMatching} from "@codemirror/language"
+import {javascript} from "@codemirror/lang-javascript"
+import {html} from "@codemirror/lang-html"
+import {elixir} from "codemirror-lang-elixir"
+import {markdown} from "@codemirror/lang-markdown"
 
+const FOLDER_STORAGE_KEY = "editor:last_folder_path"
 const FILE_STORAGE_KEY = "editor:last_file_path"
+const LLM_MODAL_OPEN_KEY = "editor:llm_modal_open"
+const LLM_QUESTION_KEY = "editor:llm_question"
+const LLM_RESPONSE_KEY = "editor:llm_response"
+
+function languageExtension(path) {
+  if (!path) return []
+
+  if (path.endsWith(".ex") || path.endsWith(".exs")) {
+    return [elixir()]
+  }
+
+  if (path.endsWith(".heex") || path.endsWith(".html")) {
+    return [html()]
+  }
+
+  if (path.endsWith(".js") || path.endsWith(".mjs") || path.endsWith(".cjs")) {
+    return [javascript()]
+  }
+
+  if (path.endsWith(".md") || path.endsWith(".markdown")) {
+    return [markdown()]
+  }
+  return []
+}
+
+function buildEditorExtensions(hook, path) {
+  return [
+    lineNumbers(),
+    highlightActiveLineGutter(),
+    history(),
+    bracketMatching(),
+    syntaxHighlighting(defaultHighlightStyle),
+    keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
+    ...languageExtension(path),
+    EditorView.lineWrapping,
+    EditorView.updateListener.of((update) => {
+      if (!update.docChanged) return
+
+      const value = update.state.doc.toString()
+      hook.lastValue = value
+      hook.pushEvent("edit_file", {editor: {content: value}})
+    }),
+    EditorView.theme({
+      "&": {
+        height: "100%",
+        fontSize: "14px"
+      },
+      ".cm-scroller": {
+        overflow: "auto",
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace"
+      },
+      ".cm-content": {
+        minHeight: "100%",
+        padding: "16px"
+      },
+      ".cm-gutters": {
+        borderRight: "1px solid var(--color-base-300)",
+        backgroundColor: "var(--color-base-200)"
+      }
+    })
+  ]
+}
 
 const Hooks = {
   FolderPathStorage: {
@@ -36,32 +107,33 @@ const Hooks = {
     }
   },
 
-  SelectedFileStorage: {
+  EditorShell: {
     mounted() {
-      this.lastPath = null
-      this.persistSelectedFile()
-      this.handleUpdate = () => this.persistSelectedFile()
-      this.handleEvent("file_opened", this.handleUpdate)
+      this.persist()
     },
 
     updated() {
-      this.persistSelectedFile()
+      this.persist()
     },
 
-    persistSelectedFile() {
-      const path = this.el.dataset.selectedFilePath || ""
+    persist() {
+      const selectedFilePath = this.el.dataset.selectedFilePath || ""
+      const llmModalOpen = this.el.dataset.llmModalOpen || "false"
+      const llmQuestion = this.el.dataset.llmQuestion || ""
+      const llmResponse = this.el.dataset.llmResponse || ""
 
-      if (path === this.lastPath) return
-
-      this.lastPath = path
-
-      if (path === "") {
+      if (selectedFilePath === "") {
         window.localStorage.removeItem(FILE_STORAGE_KEY)
       } else {
-        window.localStorage.setItem(FILE_STORAGE_KEY, path)
+        window.localStorage.setItem(FILE_STORAGE_KEY, selectedFilePath)
       }
+
+      window.localStorage.setItem(LLM_MODAL_OPEN_KEY, llmModalOpen)
+      window.localStorage.setItem(LLM_QUESTION_KEY, llmQuestion)
+      window.localStorage.setItem(LLM_RESPONSE_KEY, llmResponse)
     }
   },
+
   CopyCodeBlock: {
     mounted() {
       this.handleCopy = () => {
@@ -78,23 +150,58 @@ const Hooks = {
       }
     }
   },
-  LlmModalStorage: {
+
+  CodeEditor: {
     mounted() {
-      this.persist()
+      this.lastValue = this.el.dataset.content || ""
+      this.lastPath = this.el.dataset.path || ""
+
+      this.view = new EditorView({
+        state: EditorState.create({
+          doc: this.lastValue,
+          extensions: buildEditorExtensions(this, this.lastPath)
+        }),
+        parent: this.el
+      })
     },
 
     updated() {
-      this.persist()
+      if (!this.view) return
+
+      const nextValue = this.el.dataset.content || ""
+      const nextPath = this.el.dataset.path || ""
+
+      if (nextPath !== this.lastPath) {
+        this.lastPath = nextPath
+        this.lastValue = nextValue
+
+        this.view.setState(
+          EditorState.create({
+            doc: nextValue,
+            extensions: buildEditorExtensions(this, nextPath)
+          })
+        )
+
+        return
+      }
+
+      if (nextValue !== this.lastValue) {
+        this.lastValue = nextValue
+
+        this.view.dispatch({
+          changes: {
+            from: 0,
+            to: this.view.state.doc.length,
+            insert: nextValue
+          }
+        })
+      }
     },
 
-    persist() {
-      const isOpen = this.el.dataset.llmModalOpen === "true"
-      const question = this.el.dataset.llmQuestion || ""
-      const response = this.el.dataset.llmResponse || ""
-
-      window.localStorage.setItem("editor:llm_modal_open", String(isOpen))
-      window.localStorage.setItem("editor:llm_question", question)
-      window.localStorage.setItem("editor:llm_response", response)
+    destroyed() {
+      if (this.view) {
+        this.view.destroy()
+      }
     }
   }
 }
@@ -105,11 +212,11 @@ const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: () => ({
     _csrf_token: csrfToken,
-  stored_folder_path: window.localStorage.getItem("editor:last_folder_path"),
-  stored_file_path: window.localStorage.getItem(FILE_STORAGE_KEY),
-  stored_llm_modal_open: window.localStorage.getItem("editor:llm_modal_open"),
-  stored_llm_question: window.localStorage.getItem("editor:llm_question"),
-  stored_llm_response: window.localStorage.getItem("editor:llm_response")
+    stored_folder_path: window.localStorage.getItem(FOLDER_STORAGE_KEY),
+    stored_file_path: window.localStorage.getItem(FILE_STORAGE_KEY),
+    stored_llm_modal_open: window.localStorage.getItem(LLM_MODAL_OPEN_KEY),
+    stored_llm_question: window.localStorage.getItem(LLM_QUESTION_KEY),
+    stored_llm_response: window.localStorage.getItem(LLM_RESPONSE_KEY)
   }),
   hooks: {...colocatedHooks, ...Hooks},
 })
