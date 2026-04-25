@@ -1,0 +1,50 @@
+<Layouts.app flash={@flash} current_scope={assigns[:current_scope]}>
+  <aside
+    id="home-sidebar"
+    class="flex h-screen w-[15%] shrink-0 flex-col border-r border-base-300 bg-base-200"
+  >
+    <div class="border-b border-base-300 p-2">
+      <form id="folder-search-form" class="w-full">
+        <label for="folder-path" class="sr-only">
+          Folder path
+        </label>
+        <input
+          id="folder-path"
+          name="folder_path"
+          type="text"
+          placeholder="/home/ubuntu/project"
+          class="w-full rounded-md border border-base-300 bg-base-100 px-3 py-2 text-sm outline-none transition focus:border-primary"
+        />
+      </form>
+    </div>
+
+    <div id="file-explorer" class="flex-1 overflow-y-auto p-2">
+      <div class="mb-2 text-xs uppercase tracking-wide text-base-content/50">
+        {@cwd}
+      </div>
+
+      <div class="space-y-1">
+        <%= for entry <- @entries do %>
+          <div class="rounded px-2 py-1 text-sm hover:bg-base-300">
+            <span>
+              {if entry.type == :directory, do: "📁", else: "📄"}
+            </span>
+            <span class="ml-2">{entry.name}</span>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </aside>
+
+  <section
+    id="home-content"
+    class="flex h-screen flex-1 items-center justify-center bg-base-100"
+  >
+    <div class="w-full max-w-3xl px-6 py-8">
+      <h1 class="text-2xl font-semibold tracking-tight">Editor</h1>
+      <p class="mt-2 text-sm text-base-content/70">
+        Main content area.
+      </p>
+    </div>
+  </section>
+</Layouts.app>
