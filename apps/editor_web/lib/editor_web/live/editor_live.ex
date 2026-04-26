@@ -2,7 +2,6 @@ defmodule EditorWeb.EditorLive do
   use EditorWeb, :live_view
 
   @indent_px 14
-  @llm_max_file_chars 12_000
 
   @impl true
   def mount(_params, _session, socket) do
@@ -27,18 +26,6 @@ defmodule EditorWeb.EditorLive do
         _ -> false
       end
 
-    stored_llm_question =
-      case connect_params do
-        %{"stored_llm_question" => question} when is_binary(question) -> question
-        _ -> ""
-      end
-
-    stored_llm_response =
-      case connect_params do
-        %{"stored_llm_response" => response} when is_binary(response) -> response
-        _ -> nil
-      end
-
     cwd =
       stored_folder_path
       |> normalize_path(default_cwd)
@@ -46,11 +33,9 @@ defmodule EditorWeb.EditorLive do
 
     socket =
       socket
-      |> assign(:llm_modal_open?, stored_llm_modal_open)
-      |> assign(:llm_response, stored_llm_response)
-      |> assign(:llm_form, to_form(%{"question" => stored_llm_question}, as: :llm))
       |> base_assigns(cwd)
       |> maybe_restore_selected_file(stored_file_path)
+      |> restore_llm_state(stored_llm_modal_open)
 
     {:ok, socket}
   end
@@ -150,9 +135,7 @@ defmodule EditorWeb.EditorLive do
      socket
      |> assign(:llm_modal_open?, true)
      |> assign(:llm_loading?, false)
-     |> assign(:llm_response, nil)
-     |> assign(:llm_error, nil)
-     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))}
+     |> assign(:llm_error, nil)}
   end
 
   @impl true
@@ -171,35 +154,46 @@ defmodule EditorWeb.EditorLive do
       socket.assigns.llm_loading? ->
         {:noreply, socket}
 
-      is_nil(socket.assigns.selected_file) ->
-        {:noreply,
-         socket
-         |> assign(:llm_error, "Open a file before asking the LLM.")
-         |> assign(:llm_response, nil)
-         |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))}
-
       trimmed_question == "" ->
         {:noreply,
          socket
          |> assign(:llm_error, "Enter a question.")
          |> assign(:llm_response, nil)
+         |> assign(:llm_context, nil)
          |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))}
 
       true ->
-        messages =
-          Llm.Prompts.editor_file_question(
-            socket.assigns.selected_file,
-            socket.assigns.file_content,
-            trimmed_question
-          )
+        case Llm.build_context(
+               socket.assigns.cwd,
+               socket.assigns.selected_file,
+               trimmed_question
+             ) do
+          {:ok, context} ->
+            prompt_stats = Llm.Prompts.stats(context.messages)
 
-        {:noreply,
-         socket
-         |> assign(:llm_loading?, true)
-         |> assign(:llm_error, nil)
-         |> assign(:llm_response, nil)
-         |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))
-         |> start_async(:ask_llm, fn -> Llm.chat(messages) end)}
+            {:noreply,
+             socket
+             |> assign(:llm_loading?, true)
+             |> assign(:llm_error, nil)
+             |> assign(:llm_response, nil)
+             |> assign(:llm_context, %{
+               "mode" => Atom.to_string(context.mode),
+               "path" => socket.assigns.selected_file || socket.assigns.cwd,
+               "question" => trimmed_question,
+               "file_count" => length(context.files),
+               "prompt_stats" => prompt_stats
+             })
+             |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))
+             |> start_async(:ask_llm, fn -> Llm.chat(context.messages) end)}
+
+          {:error, message} ->
+            {:noreply,
+             socket
+             |> assign(:llm_error, message)
+             |> assign(:llm_response, nil)
+             |> assign(:llm_context, nil)
+             |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))}
+        end
     end
   end
 
@@ -218,6 +212,7 @@ defmodule EditorWeb.EditorLive do
      socket
      |> assign(:llm_loading?, false)
      |> assign(:llm_response, nil)
+     |> assign(:llm_context, nil)
      |> assign(:llm_error, "LLM request failed: #{inspect(reason)}")}
   end
 
@@ -227,6 +222,7 @@ defmodule EditorWeb.EditorLive do
      socket
      |> assign(:llm_loading?, false)
      |> assign(:llm_response, nil)
+     |> assign(:llm_context, nil)
      |> assign(:llm_error, "LLM task crashed: #{inspect(reason)}")}
   end
 
@@ -240,8 +236,6 @@ defmodule EditorWeb.EditorLive do
         phx-hook="EditorShell"
         data-selected-file-path={@selected_file || ""}
         data-llm-modal-open={to_string(@llm_modal_open?)}
-        data-llm-question={Phoenix.HTML.Form.input_value(@llm_form, :question) || ""}
-        data-llm-response={@llm_response || ""}
       >
         <aside
           id="editor-sidebar"
@@ -294,24 +288,26 @@ defmodule EditorWeb.EditorLive do
               <div class="truncate text-sm font-medium">
                 {selected_file_label(@selected_file)}
               </div>
-              <%= if @selected_file do %>
-                <div class="mt-1 text-xs text-base-content/60">
+              <div class="mt-1 text-xs text-base-content/60">
+                <%= if @selected_file do %>
                   {if @dirty?, do: "Unsaved changes", else: "Saved"}
-                </div>
-              <% end %>
+                <% else %>
+                  Ask the LLM about the current folder or open a file for file-specific context.
+                <% end %>
+              </div>
             </div>
 
-            <%= if @selected_file do %>
-              <div class="flex items-center gap-2">
-                <button
-                  id="open-llm-button"
-                  type="button"
-                  phx-click="open_llm"
-                  class="rounded-md border border-base-300 bg-base-200 px-3 py-2 text-sm font-medium transition hover:bg-base-300"
-                >
-                  Ask LLM
-                </button>
+            <div class="flex items-center gap-2">
+              <button
+                id="open-llm-button"
+                type="button"
+                phx-click="open_llm"
+                class="rounded-md border border-base-300 bg-base-200 px-3 py-2 text-sm font-medium transition hover:bg-base-300"
+              >
+                Ask LLM
+              </button>
 
+              <%= if @selected_file do %>
                 <.form for={@editor_form} id="editor-save-form" phx-submit="save_file">
                   <button
                     id="save-file-button"
@@ -322,8 +318,8 @@ defmodule EditorWeb.EditorLive do
                     Save
                   </button>
                 </.form>
-              </div>
-            <% end %>
+              <% end %>
+            </div>
           </div>
 
           <%= if @save_message do %>
@@ -357,7 +353,7 @@ defmodule EditorWeb.EditorLive do
                 id="editor-empty-state"
                 class="flex h-full items-center justify-center px-6 text-sm text-base-content/60"
               >
-                Select a file from the explorer.
+                Select a file from the explorer, or ask the LLM about the current folder.
               </div>
             <% end %>
           </div>
@@ -378,8 +374,10 @@ defmodule EditorWeb.EditorLive do
             >
               <div class="flex items-center justify-between border-b border-base-300 px-4 py-3">
                 <div class="min-w-0">
-                  <div class="text-sm font-semibold">Ask LLM About This File</div>
-                  <div class="truncate text-xs text-base-content/60">{@selected_file}</div>
+                  <div class="text-sm font-semibold">Ask LLM</div>
+                  <div class="truncate text-xs text-base-content/60">
+                    {llm_target_label(@cwd, @selected_file)}
+                  </div>
                 </div>
 
                 <button
@@ -398,7 +396,7 @@ defmodule EditorWeb.EditorLive do
                     field={@llm_form[:question]}
                     id="llm-question"
                     type="text"
-                    placeholder="Ask about the current file"
+                    placeholder="Ask about the current file or folder"
                     class="w-full rounded-md border border-base-300 bg-base-100 px-3 py-2 text-sm outline-none transition focus:border-primary"
                   />
 
@@ -413,6 +411,14 @@ defmodule EditorWeb.EditorLive do
                     </button>
                   </div>
                 </.form>
+
+                <div
+                  :if={llm_prompt_stats_label(@llm_context)}
+                  id="llm-prompt-stats"
+                  class="mt-3 text-xs text-base-content/60"
+                >
+                  {llm_prompt_stats_label(@llm_context)}
+                </div>
 
                 <%= if @llm_error do %>
                   <div
@@ -594,6 +600,7 @@ defmodule EditorWeb.EditorLive do
     |> assign(:llm_modal_open?, false)
     |> assign(:llm_loading?, false)
     |> assign(:llm_response, nil)
+    |> assign(:llm_context, nil)
     |> assign(:llm_error, nil)
     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
   end
@@ -631,6 +638,7 @@ defmodule EditorWeb.EditorLive do
          |> assign(:error_message, nil)
          |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))
          |> assign(:llm_response, nil)
+         |> assign(:llm_context, nil)
          |> assign(:llm_error, nil)}
 
       {:error, reason} ->
@@ -698,42 +706,9 @@ defmodule EditorWeb.EditorLive do
     |> assign(:llm_modal_open?, false)
     |> assign(:llm_loading?, false)
     |> assign(:llm_response, nil)
+    |> assign(:llm_context, nil)
     |> assign(:llm_error, nil)
     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
-  end
-
-  defp build_llm_messages(path, content, question) do
-    truncated_content =
-      if String.length(content) > @llm_max_file_chars do
-        String.slice(content, 0, @llm_max_file_chars) <>
-          "\n\n[Truncated before sending to the model.]"
-      else
-        content
-      end
-
-    [
-      %{
-        role: "system",
-        content: """
-        You are a concise Elixir and Phoenix coding assistant embedded in a text editor.
-        Answer only using the provided file contents and the user's question.
-        If the file does not contain enough information, say so plainly.
-        Prefer short, practical answers.
-        """
-      },
-      %{
-        role: "user",
-        content: """
-        File path: #{path}
-
-        File contents:
-        #{truncated_content}
-
-        Question:
-        #{question}
-        """
-      }
-    ]
   end
 
   defp load_entries(path) do
@@ -820,6 +795,73 @@ defmodule EditorWeb.EditorLive do
       default_cwd
     end
   end
+
+  defp restore_llm_state(socket, modal_open?) do
+    assign(socket, :llm_modal_open?, modal_open?)
+  end
+
+  defp build_llm_request(cwd, nil, _file_content, question) do
+    messages = Llm.Prompts.editor_folder_question(cwd, question)
+    prompt_stats = Llm.Prompts.stats(messages)
+
+    llm_context = %{
+      "mode" => "folder",
+      "path" => cwd,
+      "question" => question,
+      "prompt_stats" => prompt_stats
+    }
+
+    {messages, llm_context}
+  end
+
+  defp build_llm_request(_cwd, selected_file, file_content, question) do
+    messages = Llm.Prompts.editor_file_question(selected_file, file_content, question)
+    prompt_stats = Llm.Prompts.stats(messages)
+
+    llm_context = %{
+      "mode" => "file",
+      "path" => selected_file,
+      "question" => question,
+      "prompt_stats" => prompt_stats
+    }
+
+    {messages, llm_context}
+  end
+
+  defp llm_target_label(cwd, nil), do: "Folder: #{cwd}"
+  defp llm_target_label(_cwd, selected_file), do: "File: #{selected_file}"
+
+  defp llm_prompt_stats_label(%{"prompt_stats" => stats} = context) when is_map(stats) do
+    estimated_tokens = map_value(stats, :estimated_tokens, 0)
+    message_count = map_value(stats, :message_count, 0)
+
+    parts =
+      [
+        "~#{estimated_tokens} #{pluralize(estimated_tokens, "token")}",
+        "#{message_count} #{pluralize(message_count, "message")}"
+      ] ++ file_count_stats_parts(context)
+
+    "Prompt: " <> Enum.join(parts, " | ")
+  end
+
+  defp llm_prompt_stats_label(_context), do: nil
+
+  defp file_count_stats_parts(context) do
+    case Map.get(context, "file_count") do
+      count when is_integer(count) ->
+        ["#{count} #{pluralize(count, "file")}"]
+
+      _ ->
+        []
+    end
+  end
+
+  defp map_value(map, key, default) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key)) || default
+  end
+
+  defp pluralize(1, word), do: word
+  defp pluralize(_count, word), do: word <> "s"
 
   defp padding_left(depth), do: 8 + depth * @indent_px
 

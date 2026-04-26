@@ -15,8 +15,8 @@ import {markdown} from "@codemirror/lang-markdown"
 const FOLDER_STORAGE_KEY = "editor:last_folder_path"
 const FILE_STORAGE_KEY = "editor:last_file_path"
 const LLM_MODAL_OPEN_KEY = "editor:llm_modal_open"
-const LLM_QUESTION_KEY = "editor:llm_question"
 const LLM_RESPONSE_KEY = "editor:llm_response"
+const LLM_CONTEXT_KEY = "editor:llm_context"
 
 function languageExtension(path) {
   if (!path) return []
@@ -36,6 +36,7 @@ function languageExtension(path) {
   if (path.endsWith(".md") || path.endsWith(".markdown")) {
     return [markdown()]
   }
+
   return []
 }
 
@@ -119,8 +120,6 @@ const Hooks = {
     persist() {
       const selectedFilePath = this.el.dataset.selectedFilePath || ""
       const llmModalOpen = this.el.dataset.llmModalOpen || "false"
-      const llmQuestion = this.el.dataset.llmQuestion || ""
-      const llmResponse = this.el.dataset.llmResponse || ""
 
       if (selectedFilePath === "") {
         window.localStorage.removeItem(FILE_STORAGE_KEY)
@@ -129,8 +128,11 @@ const Hooks = {
       }
 
       window.localStorage.setItem(LLM_MODAL_OPEN_KEY, llmModalOpen)
-      window.localStorage.setItem(LLM_QUESTION_KEY, llmQuestion)
-      window.localStorage.setItem(LLM_RESPONSE_KEY, llmResponse)
+
+      // Clear legacy LLM payloads so LiveView connect params stay small.
+      window.localStorage.removeItem(LLM_RESPONSE_KEY)
+      window.localStorage.removeItem(LLM_CONTEXT_KEY)
+      window.localStorage.removeItem("editor:llm_question")
     }
   },
 
@@ -214,9 +216,7 @@ const liveSocket = new LiveSocket("/live", Socket, {
     _csrf_token: csrfToken,
     stored_folder_path: window.localStorage.getItem(FOLDER_STORAGE_KEY),
     stored_file_path: window.localStorage.getItem(FILE_STORAGE_KEY),
-    stored_llm_modal_open: window.localStorage.getItem(LLM_MODAL_OPEN_KEY),
-    stored_llm_question: window.localStorage.getItem(LLM_QUESTION_KEY),
-    stored_llm_response: window.localStorage.getItem(LLM_RESPONSE_KEY)
+    stored_llm_modal_open: window.localStorage.getItem(LLM_MODAL_OPEN_KEY)
   }),
   hooks: {...colocatedHooks, ...Hooks},
 })

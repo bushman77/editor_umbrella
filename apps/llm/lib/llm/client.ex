@@ -3,9 +3,10 @@ defmodule Llm.Client do
 
   @base_url "http://127.0.0.1:8000"
   @request_options [
-    receive_timeout: 360_000 * 2,
+    receive_timeout: 1_200_000,
     connect_options: [timeout: 5_000]
   ]
+  @chat_max_tokens 2_048
 
   def chat(messages) when is_list(messages) do
     with {:ok, body} <- chat_raw(messages) do
@@ -22,7 +23,7 @@ defmodule Llm.Client do
             model: "local-model",
             messages: messages,
             stream: false,
-            max_tokens: 2048
+            max_tokens: @chat_max_tokens
           }
         ] ++ @request_options
       )
