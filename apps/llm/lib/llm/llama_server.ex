@@ -50,8 +50,8 @@ defmodule Llm.LlamaServer do
   @flash_attention "on"
   @gpu_layers "auto"
   @parallel_slots 1
-  @context_size 16_384
-  @max_tokens 4_096
+  @context_size 65_536
+  @max_tokens 8_192
   @batch_size 2_048
   @micro_batch_size 512
 

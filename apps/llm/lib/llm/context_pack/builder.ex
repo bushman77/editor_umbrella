@@ -89,6 +89,7 @@ defmodule Llm.ContextPack.Builder do
       when is_map(project_memory) and is_binary(question) do
     module_refs = refs_for_mentioned_modules(project_memory, question)
     file_refs = refs_for_mentioned_files(project_memory, question)
+    auth_refs = refs_for_auth_context(project_memory, question)
     current_file_related_refs =
       if test_question?(question) do
         []
@@ -100,6 +101,7 @@ defmodule Llm.ContextPack.Builder do
 
     module_refs
     |> Kernel.++(file_refs)
+    |> Kernel.++(auth_refs)
     |> Kernel.++(current_file_related_refs)
     |> Kernel.++(test_refs)
     |> dedupe_refs()
@@ -158,6 +160,66 @@ defmodule Llm.ContextPack.Builder do
         end
       end)
     end)
+  end
+
+  defp refs_for_auth_context(project_memory, question) do
+    if auth_question?(question) do
+      project_memory.files
+      |> Enum.map(fn {path, memory} -> {auth_context_score(path, memory), memory} end)
+      |> Enum.filter(fn {score, _memory} -> score > 0 end)
+      |> Enum.sort_by(fn {score, memory} -> {-score, summary_path(memory)} end)
+      |> Enum.take(6)
+      |> Enum.flat_map(fn {_score, memory} -> refs_for_file_memory(memory, 2) end)
+    else
+      []
+    end
+  end
+
+  defp auth_question?(question) do
+    normalized = String.downcase(question)
+
+    Regex.match?(
+      ~r/\b(current_user|current user|logged in|login|session|auth|authenticated|current_scope|presence|user object|user who logged in)\b/,
+      normalized
+    )
+  end
+
+  defp auth_context_score(path, memory) do
+    searchable =
+      [
+        path,
+        memory |> Map.get(:summary) |> summary_text(),
+        memory |> Map.get(:chunks, []) |> Enum.map_join("\n", & &1.content)
+      ]
+      |> Enum.join("\n")
+      |> String.downcase()
+
+    [
+      {"current_user", 6},
+      {"current_scope", 6},
+      {"user_session", 5},
+      {"log_in", 5},
+      {"authenticated", 4},
+      {"presence", 4},
+      {"session", 3},
+      {"user", 1}
+    ]
+    |> Enum.reduce(0, fn {term, weight}, score ->
+      if String.contains?(searchable, term), do: score + weight, else: score
+    end)
+  end
+
+  defp summary_text(%FileSummary{} = summary) do
+    Enum.join([summary.path, summary.summary, Enum.join(summary.module_names || [], " ")], "\n")
+  end
+
+  defp summary_text(_summary), do: ""
+
+  defp summary_path(memory) do
+    case Map.get(memory, :summary) do
+      %FileSummary{path: path} -> path
+      _ -> ""
+    end
   end
 
   defp refs_related_to_current_file(_project_memory, nil), do: []
@@ -315,10 +377,19 @@ defmodule Llm.ContextPack.Builder do
 
         Use the provided project memory, file refs, and exact snippets as your working context.
         Prefer the current file and current selection when they are present.
+
+        Grounding rules:
+        - Answer from the provided snippets and relevant-file summaries, not from generic framework knowledge alone.
+        - When explaining project behavior, name the specific file paths, modules, functions, assigns, or plugs you used.
+        - If the snippets do not show the requested object, assign, plug, or function, say that it is not present in the provided context and describe what file should be opened or searched next.
+        - Do not invent application names, topics, assigns, or user/session fields that are not visible in the provided context.
+        - Do not treat Phoenix Presence metadata as the logged-in/authenticated user object unless the snippets explicitly show that the metadata came from auth/session data.
         """)
       ] ++
         maybe_refactor_contract_message(question) ++
+        maybe_review_contract_message(question, current_file) ++
         maybe_summary_message(conversation_summary) ++
+        maybe_current_file_message(current_file) ++
         maybe_relevant_files_message(summaries) ++
         maybe_selection_message(current_file, selection) ++
         snippet_messages(project_memory, refs)
@@ -354,6 +425,23 @@ defmodule Llm.ContextPack.Builder do
     end
   end
 
+  defp maybe_review_contract_message(question, current_file) do
+    if review_question?(question) and is_binary(current_file) do
+      [
+        Prompts.system_message("""
+        Review request contract:
+        - The user is asking you to review the current file: #{current_file}.
+        - Do not ask which file to review.
+        - Review the provided snippets for this current file first.
+        - If the full file is not present, say that the review is limited to the provided snippets.
+        - Lead with concrete findings, risks, or bugs. If none are visible, say that clearly.
+        """)
+      ]
+    else
+      []
+    end
+  end
+
   defp maybe_summary_message(summary) when is_binary(summary) and summary != "" do
     [
       Prompts.system_message("""
@@ -371,6 +459,24 @@ defmodule Llm.ContextPack.Builder do
   end
 
   defp refactor_question?(_question), do: false
+
+  defp review_question?(question) when is_binary(question) do
+    normalized = String.downcase(question)
+    Regex.match?(~r/\b(review|check|audit|look over)\b/, normalized)
+  end
+
+  defp review_question?(_question), do: false
+
+  defp maybe_current_file_message(nil), do: []
+
+  defp maybe_current_file_message(current_file) when is_binary(current_file) do
+    [
+      Prompts.system_message("""
+      Current file selected in the editor:
+      #{current_file}
+      """)
+    ]
+  end
 
   defp maybe_relevant_files_message([]), do: []
 

@@ -29,15 +29,21 @@ defmodule Llm do
     end
   end
 
-  def build_context(root_path, selected_file, question)
+  def build_context(root_path, selected_file, question, opts \\ [])
       when is_binary(root_path) and is_binary(question) do
+    related_files = Keyword.get(opts, :related_files, [])
+
     with {:ok, project_memory} <- ProjectMemory.Builder.build(root_path),
          {:ok, project_memory} <-
            ensure_selected_file_memory(project_memory, root_path, selected_file),
+         {:ok, project_memory} <-
+           ensure_related_files_memory(project_memory, root_path, related_files),
+         extra_refs = refs_for_related_files(project_memory, root_path, related_files),
          pack <-
            ContextPack.Builder.build(project_memory, %{
              question: question,
-             current_file: relative_selected_file(root_path, selected_file)
+             current_file: relative_selected_file(root_path, selected_file),
+             extra_refs: extra_refs
            }) do
       {:ok,
        %{
@@ -87,6 +93,54 @@ defmodule Llm do
       end
     end
   end
+
+  defp ensure_related_files_memory(project_memory, root_path, related_files) do
+    project_memory =
+      related_files
+      |> normalize_related_files()
+      |> Enum.reduce(project_memory, fn related_file, project_memory ->
+        relative_path = relative_selected_file(root_path, related_file)
+
+        cond do
+          ProjectMemory.file_known?(project_memory, relative_path) ->
+            project_memory
+
+          not File.regular?(related_file) ->
+            project_memory
+
+          true ->
+            case ProjectMemory.Builder.build_file(root_path, related_file) do
+              {:ok, %{summary: summary, chunks: chunks}} ->
+                project_memory
+                |> ProjectMemory.put_file_summary(summary)
+                |> ProjectMemory.put_file_chunks(chunks)
+
+              {:error, _reason} ->
+                project_memory
+            end
+        end
+      end)
+
+    {:ok, project_memory}
+  end
+
+  defp refs_for_related_files(project_memory, root_path, related_files) do
+    related_files
+    |> normalize_related_files()
+    |> Enum.flat_map(fn related_file ->
+      project_memory
+      |> ProjectMemory.refs_for_path(relative_selected_file(root_path, related_file))
+    end)
+  end
+
+  defp normalize_related_files(related_files) when is_list(related_files) do
+    related_files
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
+
+  defp normalize_related_files(_related_files), do: []
 
   defp relative_selected_file(_root_path, nil), do: nil
 

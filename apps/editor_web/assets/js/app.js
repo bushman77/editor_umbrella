@@ -108,6 +108,77 @@ const Hooks = {
     }
   },
 
+  FileExplorerContextMenu: {
+    mounted() {
+      this.handleContextMenu = (event) => {
+        const fileTarget = event.target.closest("[data-context-file-path]")
+        const folderTarget = event.target.closest("[data-context-folder-path]")
+
+        if (fileTarget && this.el.contains(fileTarget)) {
+          event.preventDefault()
+
+          this.pushEvent("show_file_context_menu", {
+            path: fileTarget.dataset.contextFilePath,
+            x: event.clientX,
+            y: event.clientY
+          })
+
+          return
+        }
+
+        if (!folderTarget || !this.el.contains(folderTarget)) return
+
+        event.preventDefault()
+
+        this.pushEvent("show_folder_context_menu", {
+          path: folderTarget.dataset.contextFolderPath,
+          x: event.clientX,
+          y: event.clientY
+        })
+      }
+
+      this.handleDocumentClick = (event) => {
+        const menu =
+          document.getElementById("folder-context-menu") ||
+          document.getElementById("file-context-menu")
+
+        if (menu && menu.contains(event.target)) return
+
+        this.pushEvent("hide_context_menus", {})
+      }
+
+      this.handleKeydown = (event) => {
+        if (event.key === "Escape") {
+          this.pushEvent("hide_context_menus", {})
+        }
+      }
+
+      this.handleCopy = (event) => {
+        const button = event.target.closest("[data-clipboard-text]")
+
+        if (!button) return
+
+        const text = button.dataset.clipboardText || ""
+
+        navigator.clipboard.writeText(text).then(() => {
+          this.pushEvent("hide_context_menus", {})
+        })
+      }
+
+      this.el.addEventListener("contextmenu", this.handleContextMenu)
+      document.addEventListener("click", this.handleCopy)
+      document.addEventListener("click", this.handleDocumentClick)
+      document.addEventListener("keydown", this.handleKeydown)
+    },
+
+    destroyed() {
+      this.el.removeEventListener("contextmenu", this.handleContextMenu)
+      document.removeEventListener("click", this.handleCopy)
+      document.removeEventListener("click", this.handleDocumentClick)
+      document.removeEventListener("keydown", this.handleKeydown)
+    }
+  },
+
   EditorShell: {
     mounted() {
       this.persist()
