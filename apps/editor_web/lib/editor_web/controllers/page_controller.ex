@@ -1,6 +1,7 @@
 defmodule EditorWeb.PageController do
   use EditorWeb, :controller
 
+  @spec home(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def home(conn, _params) do
     cwd = File.cwd!()
 

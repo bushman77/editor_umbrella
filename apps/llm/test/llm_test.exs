@@ -100,7 +100,7 @@ defmodule LlmTest do
     assert prompt =~ "tail"
   end
 
-  test "build_context includes explicit related files as supporting context" do
+  test "build_context uses related file specs without injecting related file bodies" do
     root_path =
       Path.join(System.tmp_dir!(), "llm-related-context-test-#{System.unique_integer()}")
 
@@ -116,24 +116,44 @@ defmodule LlmTest do
 
     File.write!(
       related_path,
-      "defmodule Sample.Related do\n  def value, do: :related_context_marker\nend\n"
+      """
+      defmodule Sample.Related do
+        @spec value() :: atom()
+        def value, do: :related_context_marker
+      end
+      """
     )
 
     on_exit(fn -> File.rm_rf!(root_path) end)
 
     assert {:ok, context} =
              Llm.build_context(root_path, primary_path, "What does this use?",
-               related_files: [related_path]
+               related_file_specs: [
+                 %{
+                   path: related_path,
+                   relationship: "uses",
+                   included?: true,
+                   functions: [
+                     %{
+                       name: "value",
+                       spec: "@spec value() :: atom()",
+                       head: "def value, do: :related_context_marker",
+                       start_line: 3,
+                       end_line: 3
+                     }
+                   ]
+                 }
+               ]
              )
-
-    assert Enum.any?(context.files, &(&1.path == "lib/related.ex"))
 
     prompt =
       context.messages
       |> Enum.map(& &1.content)
       |> Enum.join("\n")
 
-    assert prompt =~ "related_context_marker"
+    assert prompt =~ "lib/related.ex | relationship: uses"
+    assert prompt =~ "@spec value() :: atom()"
+    refute prompt =~ "related_context_marker"
   end
 
   test "build_context includes open files as supporting workspace context" do
@@ -186,6 +206,82 @@ defmodule LlmTest do
     assert prompt =~ "open_tab_context_marker"
     assert prompt =~ "second_open_tab_context_marker"
     assert prompt =~ "SOURCE: open file supporting context"
+  end
+
+  test "context builder extracts function ranges from a file" do
+    root_path = Path.join(System.tmp_dir!(), "llm-function-range-test-#{System.unique_integer()}")
+    file_path = Path.join(root_path, "lib/sample.ex")
+
+    File.mkdir_p!(Path.dirname(file_path))
+
+    File.write!(file_path, """
+    defmodule Sample do
+      @doc "Runs the thing"
+      @spec run(term()) :: term()
+      def run(value) when is_binary(value) do
+        String.upcase(value)
+      end
+
+      defp normalize(value) do
+        String.trim(value)
+      end
+    end
+    """)
+
+    on_exit(fn -> File.rm_rf!(root_path) end)
+
+    assert [
+             %{
+               kind: "def",
+               name: "run",
+               spec: "@spec run(term()) :: term()",
+               head: "def run(value) when is_binary(value) do",
+               start_line: 2,
+               end_line: 6,
+               matches: []
+             },
+             %{
+               kind: "defp",
+               name: "normalize",
+               spec: nil,
+               head: "defp normalize(value) do",
+               start_line: 8,
+               end_line: 10,
+               matches: []
+             }
+           ] = Llm.ContextBuilder.extract_function(file_path)
+  end
+
+  test "context builder extracts functions containing ripgrep matches" do
+    root_path = Path.join(System.tmp_dir!(), "llm-function-match-test-#{System.unique_integer()}")
+    file_path = Path.join(root_path, "lib/sample.ex")
+
+    File.mkdir_p!(Path.dirname(file_path))
+
+    File.write!(file_path, """
+    defmodule Sample do
+      def run(value) do
+        String.upcase(value)
+      end
+
+      defp normalize(value) do
+        String.trim(value)
+      end
+    end
+    """)
+
+    on_exit(fn -> File.rm_rf!(root_path) end)
+
+    assert [
+             %{
+               name: "normalize",
+               matches: [7],
+               content: content
+             }
+           ] = Llm.ContextBuilder.extract_function(file_path, "String.trim")
+
+    assert content =~ "defp normalize"
+    refute content =~ "def run"
   end
 
   test "rag build_context is the editor-aware retrieval boundary" do
@@ -495,6 +591,56 @@ defmodule LlmTest do
     refute Enum.any?(refs, &(&1.path == "lib/llm/client.ex"))
   end
 
+  test "related retrieval includes modules referenced by direct remote calls" do
+    root_path =
+      Path.join(System.tmp_dir!(), "llm-direct-module-context-test-#{System.unique_integer()}")
+
+    source_path = Path.join(root_path, "lib/brain.ex")
+    pipeline_path = Path.join(root_path, "lib/brain/pipeline/lifg_stage1.ex")
+    stage2_path = Path.join(root_path, "lib/brain/lifg/stage2.ex")
+
+    File.mkdir_p!(Path.dirname(source_path))
+    File.mkdir_p!(Path.dirname(pipeline_path))
+    File.mkdir_p!(Path.dirname(stage2_path))
+
+    File.write!(source_path, """
+    defmodule Brain do
+      def lifg_stage1(si, vec, opts) do
+        Brain.Pipeline.LIFGStage1.run(si, vec, opts, %{})
+      end
+
+      def gate_from_lifg(si, opts) do
+        Brain.LIFG.Stage2.run(si, opts)
+      end
+    end
+    """)
+
+    File.write!(pipeline_path, """
+    defmodule Brain.Pipeline.LIFGStage1 do
+      def run(si, vec, opts, state), do: {si, vec, opts, state}
+    end
+    """)
+
+    File.write!(stage2_path, """
+    defmodule Brain.LIFG.Stage2 do
+      def run(si, opts), do: {:ok, %{si: si, opts: opts}}
+    end
+    """)
+
+    on_exit(fn -> File.rm_rf!(root_path) end)
+
+    related_paths =
+      Llm.ContextBuilder.related_file_paths_for_refactor(
+        source_path,
+        File.read!(source_path),
+        "",
+        root_path
+      )
+
+    assert pipeline_path in related_paths
+    assert stage2_path in related_paths
+  end
+
   test "auth-related retrieval includes session and current user files" do
     root_path = Path.join(System.tmp_dir!(), "llm-auth-context-test-#{System.unique_integer()}")
 
@@ -647,6 +793,137 @@ defmodule LlmTest do
     assert system_prompt =~ "Do not invent config, routes, supervision, PubSub topics"
     assert system_prompt =~ "Give file/function direction only"
     assert system_prompt =~ "this is guidance, not a patch"
+  end
+
+  test "refactor prompts do not include implementation refusal contract" do
+    memory = Llm.ProjectMemory.new_snapshot(project_id: "refactor-contract-test")
+
+    pack =
+      Llm.ContextPack.Builder.build(memory, %{
+        question: "Please refactor apps/core/lib/core.ex",
+        current_file: "apps/core/lib/core.ex"
+      })
+
+    system_prompt =
+      pack.messages
+      |> Enum.filter(&(&1.role == "system"))
+      |> Enum.map(& &1.content)
+      |> Enum.join("\n")
+
+    assert system_prompt =~ "Refactor output contract"
+    assert system_prompt =~ "Do not refuse because a supporting snippet has unknown or partial line ranges"
+    refute system_prompt =~ "Implementation request contract"
+    refute system_prompt =~ "No patch from provided context"
+  end
+
+  test "related file specs are attached to the prompt as relationship objects" do
+    memory = Llm.ProjectMemory.new_snapshot(project_id: "related-file-specs-test")
+
+    pack =
+      Llm.ContextPack.Builder.build(memory, %{
+        question: "Refactor this file",
+        current_file: "lib/source.ex",
+        related_file_specs: [
+          %{
+            path: "lib/helper.ex",
+            relationship: "uses",
+            included?: true,
+            functions: [
+              %{
+                name: "call",
+                spec: "@spec call(term()) :: :ok",
+                head: "def call(value) do",
+                start_line: 12,
+                end_line: 18
+              }
+            ]
+          }
+        ]
+      })
+
+    system_prompt =
+      pack.messages
+      |> Enum.filter(&(&1.role == "system"))
+      |> Enum.map(& &1.content)
+      |> Enum.join("\n")
+
+    assert system_prompt =~ "Opened file and attached related objects"
+    assert system_prompt =~ "Opened file: lib/source.ex"
+    assert system_prompt =~ "lib/helper.ex | relationship: uses"
+    assert system_prompt =~ "call (@spec call(term()) :: :ok, lines 12-18)"
+
+    assert pack.metadata.related_file_specs == [
+             %{
+               path: "lib/helper.ex",
+               relationship: "uses",
+               included?: true,
+               functions: [
+                 %{
+                   name: "call",
+                   spec: "@spec call(term()) :: :ok",
+                   head: "def call(value) do",
+                   start_line: 12,
+                   end_line: 18
+                 }
+               ]
+             }
+           ]
+  end
+
+  test "public app functions have specs or behaviour callback implementations" do
+    root_path = Path.expand("../../..", __DIR__)
+    callback_names = MapSet.new(~w(
+      config_change
+      handle_async
+      handle_call
+      handle_cast
+      handle_continue
+      handle_event
+      handle_info
+      init
+      mount
+      render
+      start
+    )a)
+
+    missing_specs =
+      root_path
+      |> Path.join("apps/*/lib/**/*.ex")
+      |> Path.wildcard()
+      |> Enum.flat_map(fn file ->
+        lines = file |> File.read!() |> String.split("\n")
+
+        specs =
+          lines
+          |> Enum.flat_map(fn line ->
+            case Regex.run(~r/^  @spec\s+([a-zA-Z_][\w!?]*)/, line) do
+              [_, name] -> [String.to_atom(name)]
+              _ -> []
+            end
+          end)
+          |> MapSet.new()
+
+        lines
+        |> Enum.with_index(1)
+        |> Enum.flat_map(fn {line, line_number} ->
+          case Regex.run(~r/^  def(?:macro)?\s+([a-zA-Z_][\w!?]*)/, line) do
+            [_, name] ->
+              name = String.to_atom(name)
+
+              if MapSet.member?(specs, name) or MapSet.member?(callback_names, name) do
+                []
+              else
+                ["#{Path.relative_to(file, root_path)}:#{line_number} #{String.trim(line)}"]
+              end
+
+            _ ->
+              []
+          end
+        end)
+      end)
+      |> Enum.uniq()
+
+    assert missing_specs == []
   end
 
   test "implementation final answer contract is adjacent to the user question" do

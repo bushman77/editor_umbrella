@@ -6,8 +6,12 @@ defmodule Llm.Client do
     receive_timeout: :infinity,
     connect_options: [timeout: 5_000]
   ]
-  @chat_max_tokens 4_096
+  @chat_max_tokens 8_192
 
+  @type chat_message :: %{required(:role) => String.t(), required(:content) => String.t()}
+  @type response_body :: map() | String.t()
+
+  @spec chat([chat_message()], keyword()) :: {:ok, String.t()} | {:error, term()}
   def chat(messages, opts \\ []) when is_list(messages) and is_list(opts) do
     with {:ok, body} <- chat_raw(messages, opts),
          {:ok, content} <-
@@ -16,6 +20,7 @@ defmodule Llm.Client do
     end
   end
 
+  @spec chat_raw([chat_message()], keyword()) :: {:ok, response_body()} | {:error, term()}
   def chat_raw(messages, opts \\ []) when is_list(messages) and is_list(opts) do
     max_tokens = Keyword.get(opts, :max_tokens, @chat_max_tokens)
 
@@ -37,6 +42,7 @@ defmodule Llm.Client do
     error -> {:error, error}
   end
 
+  @spec complete(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
   def complete(prompt) when is_binary(prompt) do
     response =
       Req.post!(

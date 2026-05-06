@@ -9,6 +9,7 @@ defmodule Llm.Application do
     Supervisor.start_link(child_specs(), opts)
   end
 
+  @spec child_specs() :: [Supervisor.child_spec()]
   def child_specs do
     [
       {Llm.Conversation, []},

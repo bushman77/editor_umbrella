@@ -7,6 +7,9 @@ defmodule EditorWeb.Layouts do
 
   embed_templates "layouts/*"
 
+  @type assigns :: map()
+  @type rendered :: Phoenix.LiveView.Rendered.t()
+
   @doc """
   Renders the application shell around page content.
   """
@@ -22,6 +25,7 @@ defmodule EditorWeb.Layouts do
 
   slot :inner_block, required: true
 
+  @spec app(assigns()) :: rendered()
   def app(assigns) do
     ~H"""
     <main id="app-content" class="flex min-h-screen w-full">
@@ -36,6 +40,7 @@ defmodule EditorWeb.Layouts do
   attr :flash, :map, required: true, doc: "the map of flash messages"
   attr :id, :string, default: "flash-group", doc: "the optional id of flash container"
 
+  @spec flash_group(assigns()) :: rendered()
   def flash_group(assigns) do
     ~H"""
     <div id={@id} aria-live="polite">
@@ -72,6 +77,7 @@ defmodule EditorWeb.Layouts do
   @doc """
   Provides dark vs light theme toggle based on themes defined in app.css.
   """
+  @spec theme_toggle(assigns()) :: rendered()
   def theme_toggle(assigns) do
     ~H"""
     <div class="relative flex items-center rounded-full border border-base-300 bg-base-200 p-1">

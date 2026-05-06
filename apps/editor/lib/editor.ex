@@ -7,5 +7,6 @@ defmodule Editor do
   if it comes from the database, an external API or others.
   """
 
+  @spec hello() :: :world
   def hello, do: :world
 end

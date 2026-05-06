@@ -85,7 +85,12 @@ defmodule EditorWeb.EditorLiveTest do
     |> element(file_entry_selector(source_file))
     |> render_click()
 
+    view
+    |> element("#toggle-related-files-button")
+    |> render_click()
+
     assert has_element?(view, related_file_selector(helper_file))
+    assert has_element?(view, related_file_reason_selector(helper_file), "uses")
     assert has_element?(view, related_file_functions_selector(helper_file), "call")
     assert has_element?(view, related_file_functions_selector(helper_file), "normalize")
 
@@ -96,6 +101,95 @@ defmodule EditorWeb.EditorLiveTest do
     assert has_element?(view, tab_selector(source_file))
     assert has_element?(view, tab_selector(helper_file))
     assert has_element?(view, code_editor_selector(helper_file))
+  end
+
+  @tag :tmp_dir
+  test "shows all discovered related files for the opened file", %{conn: conn, tmp_dir: tmp_dir} do
+    source_file = Path.join([tmp_dir, "lib", "source.ex"])
+    caller_files = Enum.map(1..17, &Path.join([tmp_dir, "lib", "caller_#{&1}.ex"]))
+    discovery_file = Path.join([tmp_dir, "lib", "discovery.ex"])
+
+    File.mkdir_p!(Path.dirname(source_file))
+
+    File.write!(source_file, """
+    defmodule Sample.Source do
+      def run, do: :ok
+    end
+    """)
+
+    for {caller_file, index} <- Enum.with_index(caller_files, 1) do
+      File.write!(caller_file, """
+      defmodule Sample.Caller#{index} do
+        def call, do: Sample.Source.run()
+      end
+      """)
+    end
+
+    File.write!(discovery_file, """
+    defmodule Sample.Discovery do
+      alias Source
+
+      def noop, do: :ok
+    end
+    """)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    view
+    |> form("#folder-search-form", explorer: %{folder_path: tmp_dir})
+    |> render_submit()
+
+    view
+    |> element(file_entry_selector(source_file))
+    |> render_click()
+
+    for caller_file <- caller_files do
+      refute has_element?(view, related_file_selector(caller_file))
+    end
+
+    refute has_element?(view, "#related-file-link-list")
+
+    view
+    |> element("#toggle-related-files-button")
+    |> render_click()
+
+    assert has_element?(view, "#related-file-link-list")
+    refute has_element?(view, related_file_selector(discovery_file))
+
+    for caller_file <- caller_files do
+      assert has_element?(view, related_file_selector(caller_file))
+      assert has_element?(view, related_file_reason_selector(caller_file), "used by")
+      assert has_element?(view, related_file_context_toggle_selector(caller_file, true))
+    end
+
+    view
+    |> element("#toggle-discovery-related-files-button")
+    |> render_click()
+
+    assert has_element?(view, "#toggle-discovery-related-files-button[aria-pressed=\"true\"]")
+    assert has_element?(view, related_file_selector(discovery_file))
+    assert has_element?(view, related_file_reason_selector(discovery_file), "related")
+
+    view
+    |> element("#toggle-discovery-related-files-button")
+    |> render_click()
+
+    assert has_element?(view, "#toggle-discovery-related-files-button[aria-pressed=\"false\"]")
+    refute has_element?(view, related_file_selector(discovery_file))
+
+    first_caller_file = List.first(caller_files)
+
+    view
+    |> element(related_file_context_toggle_selector(first_caller_file, true))
+    |> render_click()
+
+    assert has_element?(view, related_file_context_toggle_selector(first_caller_file, false))
+
+    view
+    |> element("#toggle-related-files-button")
+    |> render_click()
+
+    refute has_element?(view, "#related-file-link-list")
   end
 
   @tag :tmp_dir
@@ -233,6 +327,12 @@ defmodule EditorWeb.EditorLiveTest do
 
   defp related_file_functions_selector(path),
     do: ~s([id="related-file-functions-#{file_tab_dom_id(path)}"])
+
+  defp related_file_reason_selector(path),
+    do: ~s([id="related-file-reason-#{file_tab_dom_id(path)}"])
+
+  defp related_file_context_toggle_selector(path, included?),
+    do: ~s([id="toggle-related-context-#{file_tab_dom_id(path)}"][aria-pressed="#{included?}"])
 
   defp tab_selector(path), do: ~s([id="open-tab-#{file_tab_dom_id(path)}"])
 

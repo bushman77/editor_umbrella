@@ -265,6 +265,32 @@ defmodule EditorWeb.EditorLive do
   end
 
   @impl true
+  def handle_event("toggle_related_files", _params, socket) do
+    {:noreply, update(socket, :related_files_collapsed?, &(!&1))}
+  end
+
+  @impl true
+  def handle_event("toggle_discovery_related_files", _params, socket) do
+    {:noreply, update(socket, :show_discovery_related_files?, &(!&1))}
+  end
+
+  @impl true
+  def handle_event("toggle_related_context", %{"path" => path}, socket) do
+    normalized_path = normalize_path(path, socket.assigns.cwd)
+
+    if normalized_path in socket.assigns.related_files do
+      included? = related_file_included?(socket, normalized_path)
+
+      {:noreply,
+       update(socket, :related_file_context_overrides, fn overrides ->
+         Map.put(overrides, normalized_path, not included?)
+       end)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
   def handle_event("ask_llm", %{"llm" => %{"question" => question}}, socket) do
     trimmed_question = String.trim(question)
 
@@ -296,7 +322,8 @@ defmodule EditorWeb.EditorLive do
                context_root,
                socket.assigns.selected_file,
                trimmed_question,
-               related_files: socket.assigns.related_files,
+               related_files: llm_related_files(socket),
+               related_file_specs: llm_related_file_specs(socket),
                open_files: socket.assigns.open_tabs,
                conversation_id: socket.assigns.llm_conversation_id,
                recent_messages: recent_messages,
@@ -692,39 +719,165 @@ defmodule EditorWeb.EditorLive do
               id="related-file-links"
               class="flex min-w-0 items-center gap-2 border-t border-base-300 bg-base-100 px-4 py-2"
             >
-              <span class="shrink-0 text-xs font-medium uppercase tracking-wide text-base-content/50">
-                Related
-              </span>
+              <button
+                id="toggle-related-files-button"
+                type="button"
+                phx-click="toggle_related_files"
+                aria-expanded={to_string(not @related_files_collapsed?)}
+                class="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium uppercase tracking-wide text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+              >
+                <.icon
+                  name={
+                    if(@related_files_collapsed?,
+                      do: "hero-chevron-right",
+                      else: "hero-chevron-down"
+                    )
+                  }
+                  class="h-3.5 w-3.5"
+                />
+                <span>Related</span>
+                <span class="rounded bg-base-300 px-1.5 py-0.5 text-[0.65rem] leading-none">
+                  {length(@related_files)}
+                </span>
+              </button>
+
+              <button
+                :if={!@related_files_collapsed?}
+                id="toggle-discovery-related-files-button"
+                type="button"
+                phx-click="toggle_discovery_related_files"
+                aria-pressed={to_string(@show_discovery_related_files?)}
+                class={[
+                  "flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition hover:bg-base-200 hover:text-base-content",
+                  @show_discovery_related_files? && "text-base-content/80",
+                  !@show_discovery_related_files? && "text-base-content/45"
+                ]}
+              >
+                <.icon
+                  name={if(@show_discovery_related_files?, do: "hero-eye", else: "hero-eye-slash")}
+                  class="h-3.5 w-3.5"
+                />
+                <span>Related</span>
+              </button>
 
               <div
-                :for={path <- @related_files}
-                id={"related-file-#{file_tab_dom_id(path)}"}
-                class="group relative min-w-0"
+                :if={!@related_files_collapsed?}
+                id="related-file-link-list"
+                class="flex min-w-0 flex-1 flex-wrap items-center gap-2"
               >
-                <button
-                  type="button"
-                  phx-click="open_file"
-                  phx-value-path={path}
-                  class="min-w-0 truncate rounded-md border border-base-300 bg-base-200 px-2 py-1 text-left text-xs transition hover:bg-base-300"
+                <div
+                  :for={
+                    path <-
+                      displayed_related_files(
+                        @selected_file,
+                        @related_files,
+                        @show_discovery_related_files?
+                      )
+                  }
+                  id={"related-file-#{file_tab_dom_id(path)}"}
+                  class="group relative shrink-0"
                 >
-                  {related_file_label(@cwd, path)}
-                </button>
-
-                <div class="pointer-events-none absolute left-0 top-full z-40 mt-2 hidden w-72 rounded-md border border-base-300 bg-neutral px-3 py-2 text-xs text-neutral-content shadow-xl group-hover:block">
-                  <div class="truncate font-medium">{Path.relative_to(path, @cwd)}</div>
-                  <div class="mt-2 text-neutral-content/70">Functions</div>
-                  <div id={"related-file-functions-#{file_tab_dom_id(path)}"} class="mt-1 flex flex-wrap gap-1">
-                    <%= for function_name <- related_file_functions(path) do %>
-                      <span class="rounded bg-neutral-content/10 px-1.5 py-0.5 font-mono">
-                        {function_name}
-                      </span>
-                    <% end %>
-                    <span
-                      :if={related_file_functions(path) == []}
-                      class="text-neutral-content/60"
+                  <div class="flex max-w-80 items-center rounded-md border border-base-300 bg-base-200 text-xs transition hover:bg-base-300">
+                    <button
+                      type="button"
+                      phx-click="open_file"
+                      phx-value-path={path}
+                      class="flex min-w-0 items-center gap-1 px-2 py-1 text-left"
                     >
-                      None found
-                    </span>
+                      <span class="truncate">{related_file_label(@cwd, path)}</span>
+                      <span
+                        id={"related-file-reason-#{file_tab_dom_id(path)}"}
+                        class="shrink-0 rounded bg-base-300 px-1 py-0.5 text-[0.65rem] leading-none text-base-content/60"
+                      >
+                        {related_file_reason(@selected_file, path)}
+                      </span>
+                    </button>
+
+                    <button
+                      id={"toggle-related-context-#{file_tab_dom_id(path)}"}
+                      type="button"
+                      phx-click="toggle_related_context"
+                      phx-value-path={path}
+                      aria-pressed={
+                        to_string(
+                          related_file_included?(
+                            @selected_file,
+                            path,
+                            @related_file_context_overrides
+                          )
+                        )
+                      }
+                      class={[
+                        "border-l border-base-300 px-1.5 py-1 font-medium transition",
+                        related_file_included?(
+                          @selected_file,
+                          path,
+                          @related_file_context_overrides
+                        ) && "text-success",
+                        !related_file_included?(
+                          @selected_file,
+                          path,
+                          @related_file_context_overrides
+                        ) && "text-base-content/40"
+                      ]}
+                    >
+                      <.icon
+                        name={
+                          if(
+                            related_file_included?(
+                              @selected_file,
+                              path,
+                              @related_file_context_overrides
+                            ),
+                            do: "hero-check",
+                            else: "hero-minus"
+                          )
+                        }
+                        class="h-3.5 w-3.5"
+                      />
+                    </button>
+                  </div>
+
+                  <div class="pointer-events-none absolute left-0 top-full z-40 mt-2 hidden w-72 rounded-md border border-base-300 bg-neutral px-3 py-2 text-xs text-neutral-content shadow-xl group-hover:block">
+                    <div class="truncate font-medium">{Path.relative_to(path, @cwd)}</div>
+                    <div class="mt-1 text-neutral-content/70">
+                      Relationship: {related_file_reason(@selected_file, path)}
+                    </div>
+                    <div class="mt-1 text-neutral-content/70">
+                      LLM context: {if related_file_included?(
+                                         @selected_file,
+                                         path,
+                                         @related_file_context_overrides
+                                       ),
+                                       do: "included",
+                                       else: "excluded"}
+                    </div>
+                    <div
+                      :if={!strong_related_file?(@selected_file, path)}
+                      class="mt-1 text-neutral-content/60"
+                    >
+                      Shown for discovery only; not included in default LLM context.
+                    </div>
+                    <div class="mt-2 text-neutral-content/70">Functions</div>
+                    <div
+                      id={"related-file-functions-#{file_tab_dom_id(path)}"}
+                      class="mt-1 flex flex-wrap gap-1"
+                    >
+                      <%= for function <- related_file_functions(path) do %>
+                        <span
+                          class="max-w-full truncate rounded bg-neutral-content/10 px-1.5 py-0.5 font-mono"
+                          title={"#{function.head} (lines #{function.start_line}-#{function.end_line})"}
+                        >
+                          {function.name}
+                        </span>
+                      <% end %>
+                      <span
+                        :if={related_file_functions(path) == []}
+                        class="text-neutral-content/60"
+                      >
+                        None found
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1192,6 +1345,9 @@ defmodule EditorWeb.EditorLive do
     |> assign(:selected_file, nil)
     |> assign(:open_tabs, [])
     |> assign(:related_files, [])
+    |> assign(:related_files_collapsed?, true)
+    |> assign(:show_discovery_related_files?, false)
+    |> assign(:related_file_context_overrides, %{})
     |> assign(:file_content, "")
     |> assign(:saved_content, "")
     |> assign(:dirty?, false)
@@ -1262,6 +1418,7 @@ defmodule EditorWeb.EditorLive do
          |> assign(:selected_file, path)
          |> assign(:open_tabs, add_open_tab(socket.assigns.open_tabs, path))
          |> assign(:related_files, related_file_paths(socket.assigns.cwd, path, content))
+         |> assign(:related_file_context_overrides, %{})
          |> assign(:file_content, content)
          |> assign(:saved_content, content)
          |> assign(:dirty?, false)
@@ -1724,71 +1881,151 @@ defmodule EditorWeb.EditorLive do
     selected_path
     |> Llm.ContextBuilder.related_file_paths_for_refactor(content, "", search_root)
     |> Enum.reject(&(&1 == selected_path))
-    |> Enum.take(8)
   end
 
   defp related_file_label(_cwd, path), do: Path.basename(path)
 
-  defp related_file_functions(path) do
+  defp displayed_related_files(_selected_path, related_files, true)
+       when is_list(related_files),
+       do: related_files
+
+  defp displayed_related_files(selected_path, related_files, false)
+       when is_list(related_files) do
+    Enum.filter(related_files, &strong_related_file?(selected_path, &1))
+  end
+
+  defp llm_related_files(%{
+         assigns: %{
+           selected_file: selected_file,
+           related_files: related_files,
+           related_file_context_overrides: overrides
+         }
+       })
+       when is_binary(selected_file) and is_list(related_files) and is_map(overrides) do
+    Enum.filter(related_files, &related_file_included?(selected_file, &1, overrides))
+  end
+
+  defp llm_related_files(%{assigns: %{related_files: related_files}}) when is_list(related_files) do
+    related_files
+  end
+
+  defp llm_related_file_specs(%{
+         assigns: %{
+           selected_file: selected_file,
+           related_files: related_files,
+           related_file_context_overrides: overrides
+         }
+       })
+       when is_binary(selected_file) and is_list(related_files) and is_map(overrides) do
+    related_files
+    |> Enum.filter(&related_file_included?(selected_file, &1, overrides))
+    |> Enum.map(fn path ->
+      %{
+        path: path,
+        relationship: related_file_reason(selected_file, path),
+        included?: true,
+        functions: related_file_public_contracts(path)
+      }
+    end)
+  end
+
+  defp llm_related_file_specs(_socket), do: []
+
+  defp related_file_included?(socket, path) do
+    related_file_included?(
+      socket.assigns.selected_file,
+      path,
+      socket.assigns.related_file_context_overrides
+    )
+  end
+
+  defp related_file_included?(selected_path, path, overrides)
+       when is_binary(path) and is_map(overrides) do
+    case Map.fetch(overrides, path) do
+      {:ok, included?} -> included?
+      :error -> strong_related_file?(selected_path, path)
+    end
+  end
+
+  defp strong_related_file?(selected_path, path) do
+    related_file_reason(selected_path, path) in ["uses", "used by", "uses/used by", "test/template"]
+  end
+
+  defp related_file_reason(nil, _path), do: "related"
+
+  defp related_file_reason(selected_path, path)
+       when is_binary(selected_path) and is_binary(path) do
+    selected_analysis = file_analysis(selected_path)
+    related_analysis = file_analysis(path)
+
+    selected_uses_related? =
+      Enum.any?(related_analysis.defined_modules, &(&1 in selected_analysis.referenced_modules))
+
+    related_uses_selected? =
+      Enum.any?(selected_analysis.defined_modules, &(&1 in related_analysis.referenced_modules))
+
+    cond do
+      selected_uses_related? and related_uses_selected? -> "uses/used by"
+      selected_uses_related? -> "uses"
+      related_uses_selected? -> "used by"
+      convention_related_file?(selected_path, path) -> "test/template"
+      true -> "related"
+    end
+  end
+
+  defp file_analysis(path) do
     with true <- File.regular?(path),
          {:ok, content} <- File.read(path) do
-      content
-      |> function_names_from_content()
-      |> Enum.take(8)
+      Llm.ContextBuilder.analyze_file(content)
     else
-      _ -> []
+      _ -> %{defined_modules: [], referenced_modules: [], public_functions: []}
     end
   end
 
-  defp function_names_from_content(content) do
-    case Code.string_to_quoted(content) do
-      {:ok, ast} ->
-        ast
-        |> function_names_from_ast()
-        |> Kernel.++(function_names_from_lines(content))
-        |> Enum.uniq()
+  defp convention_related_file?(selected_path, path) do
+    selected_basename = Path.basename(selected_path, Path.extname(selected_path))
+    related_basename = Path.basename(path, Path.extname(path))
 
-      {:error, _reason} ->
-        function_names_from_lines(content)
-    end
+    related_basename in [
+      selected_basename,
+      "#{selected_basename}_test"
+    ] or String.ends_with?(path, "/#{selected_basename}_test.exs")
   end
 
-  defp function_names_from_ast(ast) do
-    {_ast, function_names} =
-      Macro.prewalk(ast, [], fn
-        {kind, _meta, args} = node, acc
-        when kind in [:def, :defp, :defmacro, :defmacrop, :defdelegate] ->
-          {node, maybe_prepend_function_name(acc, function_name_from_definition(args))}
-
-        node, acc ->
-          {node, acc}
-      end)
-
-    function_names
-    |> Enum.reverse()
-    |> Enum.uniq()
+  defp related_file_functions(path) do
+    path
+    |> Llm.ContextBuilder.extract_function()
+    |> Enum.map(fn function ->
+      %{
+        name: Map.get(function, :name, "[unknown]"),
+        kind: Map.get(function, :kind, "def"),
+        spec: Map.get(function, :spec),
+        head: Map.get(function, :head, "[unknown]"),
+        start_line: Map.get(function, :start_line, 1),
+        end_line: Map.get(function, :end_line, 1)
+      }
+    end)
+    |> Enum.reject(&(&1.name == "[unknown]"))
+    |> Enum.uniq_by(&{&1.name, &1.start_line, &1.end_line})
+    |> Enum.take(8)
   end
 
-  defp function_name_from_definition([{name, _meta, _args} | _rest]) when is_atom(name),
-    do: Atom.to_string(name)
-
-  defp function_name_from_definition([
-         {:when, _meta, [{name, _name_meta, _args} | _guards]} | _rest
-       ])
-       when is_atom(name),
-       do: Atom.to_string(name)
-
-  defp function_name_from_definition(_args), do: nil
-
-  defp maybe_prepend_function_name(function_names, nil), do: function_names
-  defp maybe_prepend_function_name(function_names, name), do: [name | function_names]
-
-  defp function_names_from_lines(content) do
-    ~r/^\s*def(?:p|macro|macrop|delegate)?\s+([a-zA-Z_][\w!?]*)/m
-    |> Regex.scan(content)
-    |> Enum.map(fn [_match, name] -> name end)
-    |> Enum.uniq()
+  defp related_file_public_contracts(path) do
+    path
+    |> related_file_functions()
+    |> Enum.filter(&public_related_function?/1)
+    |> Enum.map(fn function ->
+      %{
+        name: function.name,
+        spec: function.spec,
+        head: function.head,
+        start_line: function.start_line,
+        end_line: function.end_line
+      }
+    end)
   end
+
+  defp public_related_function?(%{kind: kind}), do: kind in ["def", "defmacro", "defdelegate"]
 
   defp matching_file_paths(search_root, pattern) do
     case System.cmd("rg", ["-l", "--fixed-strings", pattern, search_root], stderr_to_stdout: true) do

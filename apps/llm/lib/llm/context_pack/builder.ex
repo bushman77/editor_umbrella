@@ -32,6 +32,7 @@ defmodule Llm.ContextPack.Builder do
           optional(:pinned_refs) => [ContextRef.t()],
           optional(:extra_refs) => [ContextRef.t()],
           optional(:open_refs) => [ContextRef.t()],
+          optional(:related_file_specs) => [map()],
           optional(:token_budget) => pos_integer()
         }
 
@@ -43,6 +44,7 @@ defmodule Llm.ContextPack.Builder do
     recent_messages = Map.get(opts, :recent_messages, [])
     conversation_summary = Map.get(opts, :conversation_summary)
     selection = Map.get(opts, :selection)
+    related_file_specs = normalize_related_file_specs(Map.get(opts, :related_file_specs, []))
 
     refs =
       project_memory
@@ -71,6 +73,7 @@ defmodule Llm.ContextPack.Builder do
         selection,
         conversation_summary,
         recent_messages,
+        related_file_specs,
         refs,
         summaries
       )
@@ -89,7 +92,8 @@ defmodule Llm.ContextPack.Builder do
       metadata: %{
         recent_message_count: length(recent_messages),
         conversation_summary?: present?(conversation_summary),
-        ref_count: length(refs)
+        ref_count: length(refs),
+        related_file_specs: related_file_specs
       }
     )
   end
@@ -127,6 +131,12 @@ defmodule Llm.ContextPack.Builder do
 
     extra_refs = normalize_refs(Map.get(opts, :extra_refs, []))
     open_refs = normalize_refs(Map.get(opts, :open_refs, []))
+    related_file_spec_paths =
+      opts
+      |> Map.get(:related_file_specs, [])
+      |> normalize_related_file_specs()
+      |> Enum.map(& &1.path)
+      |> MapSet.new()
 
     current_file_refs =
       case current_file do
@@ -138,7 +148,8 @@ defmodule Llm.ContextPack.Builder do
       project_memory
       |> retrieve_refs(Map.get(opts, :question, ""), current_file)
       |> Enum.reject(fn ref ->
-        Enum.any?(current_file_refs, &same_ref?(&1, ref))
+        Enum.any?(current_file_refs, &same_ref?(&1, ref)) or
+          MapSet.member?(related_file_spec_paths, ref.path)
       end)
 
     current_file_refs ++ pinned_refs ++ extra_refs ++ open_refs ++ retrieved_refs
@@ -476,6 +487,7 @@ defmodule Llm.ContextPack.Builder do
         selection,
         conversation_summary,
         recent_messages,
+        [],
         refs,
         summaries
       )
@@ -509,6 +521,7 @@ defmodule Llm.ContextPack.Builder do
          selection,
          conversation_summary,
          recent_messages,
+         related_file_specs,
          refs,
          summaries
        ) do
@@ -535,6 +548,7 @@ defmodule Llm.ContextPack.Builder do
         maybe_implementation_contract_message(question) ++
         maybe_summary_message(conversation_summary) ++
         maybe_current_file_message(current_file) ++
+        maybe_related_file_specs_message(current_file, related_file_specs) ++
         maybe_relevant_files_message(summaries) ++
         maybe_selection_message(current_file, selection) ++
         snippet_messages(project_memory, refs)
@@ -550,6 +564,9 @@ defmodule Llm.ContextPack.Builder do
       [
         Prompts.system_message("""
         Refactor output contract:
+        - The user is asking to refactor the current primary file. Do not refuse because a supporting snippet has unknown or partial line ranges.
+        - Use the current selected file snippet as the target, and use supporting snippets only to preserve public behavior and dependencies.
+        - If context is incomplete, still provide the safest behavior-preserving refactor you can infer from the visible primary-file code.
         - Do not return the whole module or whole file.
         - Do not include module wrappers such as `defmodule ... do` or a final module `end`.
         - Do not include placeholder comments such as `# ... other code ...`.
@@ -591,7 +608,7 @@ defmodule Llm.ContextPack.Builder do
   end
 
   defp maybe_implementation_contract_message(question) do
-    if implementation_question?(question) do
+    if implementation_question?(question) and not refactor_question?(question) do
       [
         Prompts.system_message("""
         Implementation request contract:
@@ -647,7 +664,7 @@ defmodule Llm.ContextPack.Builder do
   defp maybe_summary_message(_summary), do: []
 
   defp final_answer_contract_messages(question) do
-    if implementation_question?(question) do
+    if implementation_question?(question) and not refactor_question?(question) do
       [
         Prompts.system_message(final_answer_contract(question))
       ]
@@ -740,6 +757,43 @@ defmodule Llm.ContextPack.Builder do
       #{current_file}
       """)
     ]
+  end
+
+  defp maybe_related_file_specs_message(_current_file, []), do: []
+
+  defp maybe_related_file_specs_message(current_file, related_file_specs) do
+    content =
+      """
+      Opened file and attached related objects:
+      Opened file: #{current_file || "[none]"}
+
+      Related objects included in this prompt:
+      #{Enum.map_join(related_file_specs, "\n", &format_related_file_spec/1)}
+      """
+
+    [Prompts.system_message(content)]
+  end
+
+  defp format_related_file_spec(spec) do
+    functions =
+      spec.functions
+      |> Enum.take(8)
+      |> Enum.map_join(", ", &format_related_function/1)
+
+    functions = if functions == "", do: "none extracted", else: functions
+
+    "- #{spec.path} | relationship: #{spec.relationship} | public API: #{functions}"
+  end
+
+  defp format_related_function(function) do
+    name = Map.get(function, :name, Map.get(function, "name", "[unknown]"))
+    spec = Map.get(function, :spec, Map.get(function, "spec"))
+    head = Map.get(function, :head, Map.get(function, "head", name))
+    start_line = Map.get(function, :start_line, Map.get(function, "start_line"))
+    end_line = Map.get(function, :end_line, Map.get(function, "end_line"))
+    contract = if is_binary(spec) and spec != "", do: spec, else: head
+
+    "#{name} (#{contract}, lines #{format_lines(start_line, end_line)})"
   end
 
   defp maybe_relevant_files_message([]), do: []
@@ -894,6 +948,50 @@ defmodule Llm.ContextPack.Builder do
       attrs when is_list(attrs) -> ContextRef.new(:file_chunk, attrs)
     end)
   end
+
+  defp normalize_related_file_specs(related_file_specs) when is_list(related_file_specs) do
+    related_file_specs
+    |> Enum.filter(&is_map/1)
+    |> Enum.flat_map(fn spec ->
+      case Map.get(spec, :path, Map.get(spec, "path")) do
+        path when is_binary(path) ->
+          [
+            %{
+              path: path,
+              relationship:
+                to_string(Map.get(spec, :relationship, Map.get(spec, "relationship", "related"))),
+              included?: Map.get(spec, :included?, Map.get(spec, "included?", true)),
+              functions:
+                normalize_related_functions(
+                  Map.get(spec, :functions, Map.get(spec, "functions", []))
+                )
+            }
+          ]
+
+        _ ->
+          []
+      end
+    end)
+    |> Enum.uniq_by(& &1.path)
+  end
+
+  defp normalize_related_file_specs(_related_file_specs), do: []
+
+  defp normalize_related_functions(functions) when is_list(functions) do
+    functions
+    |> Enum.filter(&is_map/1)
+    |> Enum.map(fn function ->
+      %{
+        name: Map.get(function, :name, Map.get(function, "name", "[unknown]")),
+        spec: Map.get(function, :spec, Map.get(function, "spec")),
+        head: Map.get(function, :head, Map.get(function, "head", "[unknown]")),
+        start_line: Map.get(function, :start_line, Map.get(function, "start_line")),
+        end_line: Map.get(function, :end_line, Map.get(function, "end_line"))
+      }
+    end)
+  end
+
+  defp normalize_related_functions(_functions), do: []
 
   defp dedupe_refs(refs) do
     Enum.uniq_by(refs, fn ref ->

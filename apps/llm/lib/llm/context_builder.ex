@@ -20,6 +20,17 @@ defmodule Llm.ContextBuilder do
           referenced_modules: [String.t()],
           public_functions: [atom()]
         }
+  @type function_range :: %{
+          path: String.t(),
+          kind: String.t(),
+          name: String.t(),
+          spec: String.t() | nil,
+          head: String.t(),
+          start_line: pos_integer(),
+          end_line: pos_integer(),
+          content: String.t(),
+          matches: [pos_integer()]
+        }
   @type context :: %{
           mode: context_mode(),
           root_path: String.t(),
@@ -105,6 +116,28 @@ defmodule Llm.ContextBuilder do
     else
       {:error, "Root path is not a directory: #{root_path}"}
     end
+  end
+
+  @spec extract_function(String.t()) :: [function_range()]
+  def extract_function(file_path) when is_binary(file_path) do
+    function_ranges_from_file(file_path)
+  end
+
+  @spec extract_function(String.t(), String.t()) :: [function_range()]
+  def extract_function(file_path, pattern) when is_binary(file_path) and is_binary(pattern) do
+    function_ranges = function_ranges_from_file(file_path)
+    hit_lines = rg_hit_lines(file_path, pattern)
+
+    function_ranges
+    |> Enum.map(fn function_range ->
+      matches =
+        Enum.filter(hit_lines, fn line_number ->
+          line_number >= function_range.start_line and line_number <= function_range.end_line
+        end)
+
+      Map.put(function_range, :matches, matches)
+    end)
+    |> Enum.reject(&(&1.matches == []))
   end
 
   @spec related_file_paths_for_refactor(String.t(), String.t(), String.t(), String.t()) :: [
@@ -218,6 +251,10 @@ defmodule Llm.ContextBuilder do
               {:defmodule, _, [{:__aliases__, _, parts}, _block]} = node, acc ->
                 {node, update_in(acc.defined_modules, &[Enum.join(parts, ".") | &1])}
 
+              {:__aliases__, _, parts} = node, acc ->
+                {node,
+                 maybe_prepend(acc, :referenced_modules, module_name_from_alias_parts(parts))}
+
               {:alias, _, args} = node, acc ->
                 {node, update_in(acc.referenced_modules, &(extract_aliases(args) ++ &1))}
 
@@ -258,6 +295,63 @@ defmodule Llm.ContextBuilder do
       {:error, _reason} ->
         %{defined_modules: [], referenced_modules: [], public_functions: []}
     end
+  end
+
+  @spec function_ranges_from_file(String.t()) :: [function_range()]
+  def function_ranges_from_file(file_path) when is_binary(file_path) do
+    with true <- File.regular?(file_path),
+         {:ok, content} <- File.read(file_path) do
+      function_ranges_from_content(file_path, content)
+    else
+      _ -> []
+    end
+  end
+
+  @spec function_ranges_from_content(String.t(), String.t()) :: [function_range()]
+  def function_ranges_from_content(file_path, content)
+      when is_binary(file_path) and is_binary(content) do
+    lines = String.split(content, "\n")
+
+    function_heads =
+      lines
+      |> Enum.with_index(1)
+      |> Enum.filter(fn {line, _line_number} -> function_head_line?(line) end)
+      |> Enum.map(fn {line, line_number} ->
+        %{
+          kind: function_kind(line),
+          name: function_name_from_head(line),
+          spec: function_spec(lines, line_number),
+          head: String.trim(line),
+          start_line: function_start_line(lines, line_number),
+          def_line: line_number
+        }
+      end)
+
+    module_end_line = module_end_line(lines)
+
+    function_heads
+    |> Enum.with_index()
+    |> Enum.map(fn {function_head, index} ->
+      end_line =
+        case Enum.at(function_heads, index + 1) do
+          %{start_line: next_start_line} -> max(next_start_line - 1, function_head.start_line)
+          nil -> max((module_end_line || length(lines) + 1) - 1, function_head.start_line)
+        end
+
+      {content, end_line} = function_content(lines, function_head.start_line, end_line)
+
+      %{
+        path: file_path,
+        kind: function_head.kind,
+        name: function_head.name,
+        spec: function_head.spec,
+        head: function_head.head,
+        start_line: function_head.start_line,
+        end_line: end_line,
+        content: content,
+        matches: []
+      }
+    end)
   end
 
   defp do_list_files_recursive(path) do
@@ -398,6 +492,133 @@ defmodule Llm.ContextBuilder do
     end
   end
 
+  defp rg_hit_lines(file_path, pattern) do
+    case rg(["-n", pattern, file_path]) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&rg_line_number/1)
+
+      {_output, _status} ->
+        []
+    end
+  end
+
+  defp rg_line_number(line) do
+    case String.split(line, ":", parts: 2) do
+      [line_number, _match] ->
+        case Integer.parse(line_number) do
+          {number, ""} -> [number]
+          _ -> []
+        end
+
+      _ ->
+        []
+    end
+  end
+
+  defp function_head_line?(line) do
+    Regex.match?(~r/^\s{2}(def|defp|defmacro|defmacrop|defdelegate)\b/, line)
+  end
+
+  defp function_kind(line) do
+    case Regex.run(~r/^\s{2}(def|defp|defmacro|defmacrop|defdelegate)\b/, line) do
+      [_match, kind] -> kind
+      _ -> "def"
+    end
+  end
+
+  defp function_name_from_head(line) do
+    case Regex.run(~r/^\s{2}(?:def|defp|defmacro|defmacrop|defdelegate)\s+([a-zA-Z_][\w!?]*)/, line) do
+      [_match, name] -> name
+      _ -> "[unknown]"
+    end
+  end
+
+  defp function_spec(lines, def_line) do
+    lines
+    |> Enum.with_index(1)
+    |> Enum.filter(fn {_line, line_number} -> line_number < def_line end)
+    |> Enum.reverse()
+    |> Enum.reduce_while([], fn {line, _line_number}, acc ->
+      trimmed = String.trim(line)
+
+      cond do
+        String.starts_with?(trimmed, "@spec ") ->
+          {:halt, [trimmed | acc]}
+
+        acc != [] and function_spec_continuation_line?(trimmed) ->
+          {:cont, [trimmed | acc]}
+
+        acc != [] and trimmed == "" ->
+          {:cont, acc}
+
+        true ->
+          {:halt, []}
+      end
+    end)
+    |> case do
+      [] -> nil
+      spec_lines -> Enum.join(spec_lines, " ")
+    end
+  end
+
+  defp function_spec_continuation_line?(trimmed) do
+    trimmed != "" and
+      not String.starts_with?(trimmed, "@") and
+      not String.starts_with?(trimmed, "def")
+  end
+
+  defp function_start_line(lines, def_line) do
+    lines
+    |> Enum.with_index(1)
+    |> Enum.filter(fn {_line, line_number} -> line_number < def_line end)
+    |> Enum.reverse()
+    |> Enum.reduce_while(def_line, fn {line, line_number}, start_line ->
+      cond do
+        function_attribute_line?(line) ->
+          {:cont, line_number}
+
+        String.trim(line) == "" ->
+          {:cont, start_line}
+
+        true ->
+          {:halt, start_line}
+      end
+    end)
+  end
+
+  defp function_attribute_line?(line) do
+    Regex.match?(~r/^\s{2}@(impl|doc|spec|callback|macrocallback|deprecated|dialyzer)\b/, line)
+  end
+
+  defp function_content(lines, start_line, end_line) do
+    function_lines =
+      lines
+      |> Enum.slice((start_line - 1)..(end_line - 1))
+      |> trim_trailing_blank_lines()
+
+    end_line = start_line + length(function_lines) - 1
+
+    {Enum.join(function_lines, "\n"), end_line}
+  end
+
+  defp module_end_line(lines) do
+    lines
+    |> Enum.with_index(1)
+    |> Enum.reverse()
+    |> Enum.find_value(fn {line, line_number} ->
+      if String.trim(line) == "end", do: line_number
+    end)
+  end
+
+  defp trim_trailing_blank_lines(lines) do
+    lines
+    |> Enum.reverse()
+    |> Enum.drop_while(&(String.trim(&1) == ""))
+    |> Enum.reverse()
+  end
+
   defp extract_aliases(args) do
     case args do
       [{:__aliases__, _, parts}] ->
@@ -446,6 +667,12 @@ defmodule Llm.ContextBuilder do
     end
   end
 
+  defp module_name_from_alias_parts(parts) when is_list(parts) and length(parts) > 1 do
+    Enum.join(parts, ".")
+  end
+
+  defp module_name_from_alias_parts(_parts), do: nil
+
   defp maybe_prepend(acc, _key, nil), do: acc
 
   defp maybe_prepend(acc, key, value) do
@@ -463,5 +690,9 @@ defmodule Llm.ContextBuilder do
   defp skip_file?(path) do
     basename = Path.basename(path)
     String.starts_with?(basename, ".") and basename not in [".formatter.exs"]
+  end
+
+  defp rg(args) do
+    System.cmd("rg", args, stderr_to_stdout: true)
   end
 end

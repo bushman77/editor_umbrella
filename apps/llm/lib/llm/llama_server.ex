@@ -41,7 +41,7 @@ defmodule Llm.LlamaServer do
   @gpu_layers "auto"
   @parallel_slots 1
   @context_size 32_768
-  @max_tokens 4_096
+  @max_tokens 8_192
   @batch_size 2_048
   @micro_batch_size 512
 
@@ -57,26 +57,38 @@ defmodule Llm.LlamaServer do
             started_by_app?: false,
             last_exit_status: nil
 
+  @type status :: %{
+          running?: boolean(),
+          ready?: boolean(),
+          started_by_app?: boolean(),
+          last_exit_status: non_neg_integer() | nil
+        }
+
   # ---------------------------------------------------------------------------
   # Public API
   # ---------------------------------------------------------------------------
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @spec ensure_running() :: :ok | {:error, :startup_timeout}
   def ensure_running do
     GenServer.call(__MODULE__, :ensure_running, :infinity)
   end
 
+  @spec status() :: status()
   def status do
     GenServer.call(__MODULE__, :status, :infinity)
   end
 
+  @spec ready?() :: boolean()
   def ready? do
     running?()
   end
 
+  @spec running?() :: boolean()
   def running? do
     case :gen_tcp.connect(tcp_host(), @port, [:binary, active: false], @tcp_connect_timeout_ms) do
       {:ok, socket} ->
@@ -88,6 +100,7 @@ defmodule Llm.LlamaServer do
     end
   end
 
+  @spec wait_until_ready(timeout()) :: :ok | {:error, :startup_timeout}
   def wait_until_ready(timeout_ms \\ @startup_wait_ms) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
 
@@ -230,6 +243,7 @@ defmodule Llm.LlamaServer do
   # Path / formatting helpers
   # ---------------------------------------------------------------------------
 
+  @spec model_path() :: String.t()
   def model_path do
     :llm
     |> Application.get_env(:model, @default_model_path)

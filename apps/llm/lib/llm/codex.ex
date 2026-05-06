@@ -5,10 +5,12 @@ defmodule Llm.Codex do
 
   use GenServer
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @spec state(GenServer.server()) :: map()
   def state(server \\ __MODULE__) do
     GenServer.call(server, :state, :infinity)
   end

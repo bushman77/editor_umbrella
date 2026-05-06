@@ -17,8 +17,12 @@ defmodule EditorWeb do
   those modules here.
   """
 
+  @type quoted_helpers :: Macro.t()
+
+  @spec static_paths() :: [String.t()]
   def static_paths, do: ~w(assets fonts images favicon.ico robots.txt)
 
+  @spec router() :: quoted_helpers()
   def router do
     quote do
       use Phoenix.Router, helpers: false
@@ -30,12 +34,14 @@ defmodule EditorWeb do
     end
   end
 
+  @spec channel() :: quoted_helpers()
   def channel do
     quote do
       use Phoenix.Channel
     end
   end
 
+  @spec controller() :: quoted_helpers()
   def controller do
     quote do
       use Phoenix.Controller, formats: [:html, :json]
@@ -48,6 +54,7 @@ defmodule EditorWeb do
     end
   end
 
+  @spec live_view() :: quoted_helpers()
   def live_view do
     quote do
       use Phoenix.LiveView
@@ -56,6 +63,7 @@ defmodule EditorWeb do
     end
   end
 
+  @spec live_component() :: quoted_helpers()
   def live_component do
     quote do
       use Phoenix.LiveComponent
@@ -64,6 +72,7 @@ defmodule EditorWeb do
     end
   end
 
+  @spec html() :: quoted_helpers()
   def html do
     quote do
       use Phoenix.Component
@@ -96,6 +105,7 @@ defmodule EditorWeb do
     end
   end
 
+  @spec verified_routes() :: quoted_helpers()
   def verified_routes do
     quote do
       use Phoenix.VerifiedRoutes,
@@ -108,6 +118,7 @@ defmodule EditorWeb do
   @doc """
   When used, dispatch to the appropriate controller/view/etc.
   """
+  @spec __using__(atom()) :: quoted_helpers()
   defmacro __using__(which) when is_atom(which) do
     apply(__MODULE__, which, [])
   end

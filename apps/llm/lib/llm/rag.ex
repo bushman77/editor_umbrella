@@ -26,6 +26,10 @@ defmodule Llm.Rag do
   def build_context(root_path, selected_file, question, opts \\ [])
       when is_binary(root_path) and is_binary(question) and is_list(opts) do
     related_files = Keyword.get(opts, :related_files, [])
+    related_file_specs =
+      normalize_related_file_specs(Keyword.get(opts, :related_file_specs, []))
+
+    related_files = related_file_paths(related_files, related_file_specs)
     open_files = Keyword.get(opts, :open_files, [])
     token_budget = Keyword.get(opts, :token_budget)
     conversation_id = Keyword.get(opts, :conversation_id)
@@ -39,12 +43,13 @@ defmodule Llm.Rag do
            ensure_related_files_memory(project_memory, root_path, related_files),
          {:ok, project_memory} <-
            ensure_related_files_memory(project_memory, root_path, open_files),
-         extra_refs = refs_for_related_files(project_memory, root_path, related_files),
+         extra_refs = refs_for_related_files(project_memory, root_path, related_files, related_file_specs),
          open_refs = refs_for_open_files(project_memory, root_path, open_files),
          pack <-
            ContextPack.Builder.build(project_memory, %{
              question: question,
              current_file: relative_selected_file(root_path, selected_file),
+             related_file_specs: relativize_related_file_specs(root_path, related_file_specs),
              extra_refs: extra_refs,
              open_refs: open_refs,
              token_budget: token_budget,
@@ -123,7 +128,11 @@ defmodule Llm.Rag do
     {:ok, project_memory}
   end
 
-  defp refs_for_related_files(project_memory, root_path, related_files) do
+  defp refs_for_related_files(_project_memory, _root_path, _related_files, [_spec | _rest]) do
+    []
+  end
+
+  defp refs_for_related_files(project_memory, root_path, related_files, []) do
     related_files
     |> normalize_related_files()
     |> Enum.flat_map(fn related_file ->
@@ -154,6 +163,41 @@ defmodule Llm.Rag do
   end
 
   defp normalize_related_files(_related_files), do: []
+
+  defp normalize_related_file_specs(related_file_specs) when is_list(related_file_specs) do
+    related_file_specs
+    |> Enum.filter(&is_map/1)
+    |> Enum.flat_map(fn spec ->
+      case Map.get(spec, :path) || Map.get(spec, "path") do
+        path when is_binary(path) ->
+          [
+            %{
+              path: Path.expand(path),
+              relationship:
+                Map.get(spec, :relationship) || Map.get(spec, "relationship") || "related",
+              included?: Map.get(spec, :included?) || Map.get(spec, "included?") || false,
+              functions: Map.get(spec, :functions) || Map.get(spec, "functions") || []
+            }
+          ]
+
+        _ ->
+          []
+      end
+    end)
+    |> Enum.uniq_by(& &1.path)
+  end
+
+  defp normalize_related_file_specs(_related_file_specs), do: []
+
+  defp related_file_paths(related_files, []), do: related_files
+  defp related_file_paths(_related_files, related_file_specs),
+    do: Enum.map(related_file_specs, & &1.path)
+
+  defp relativize_related_file_specs(root_path, related_file_specs) do
+    Enum.map(related_file_specs, fn spec ->
+      %{spec | path: relative_selected_file(root_path, spec.path)}
+    end)
+  end
 
   defp relative_selected_file(_root_path, nil), do: nil
 
