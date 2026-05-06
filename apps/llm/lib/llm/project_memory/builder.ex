@@ -85,7 +85,7 @@ defmodule Llm.ProjectMemory.Builder do
 
       chunks =
         content
-        |> chunk_content(relative_path, opts)
+        |> chunk_content(relative_path, language, opts)
         |> Enum.map(fn chunk ->
           %{
             chunk
@@ -118,7 +118,19 @@ defmodule Llm.ProjectMemory.Builder do
     end)
   end
 
-  defp chunk_content(content, path, opts) do
+  defp chunk_content(content, path, "elixir", opts) do
+    function_chunks(content, path)
+    |> case do
+      [] -> line_chunks(content, path, opts)
+      chunks -> chunks
+    end
+  end
+
+  defp chunk_content(content, path, _language, opts) do
+    line_chunks(content, path, opts)
+  end
+
+  defp line_chunks(content, path, opts) do
     chunk_lines = Keyword.get(opts, :chunk_lines, @default_chunk_lines)
     overlap = Keyword.get(opts, :chunk_overlap, @default_chunk_overlap)
     step = max(chunk_lines - overlap, 1)
@@ -137,9 +149,105 @@ defmodule Llm.ProjectMemory.Builder do
         id: "#{path}:#{chunk_index}",
         start_line: start_line,
         end_line: end_line,
-        summary: summarize_chunk(path, start_line, end_line, lines)
+        summary: summarize_chunk(path, start_line, end_line, lines),
+        metadata: %{chunk_strategy: :line_window}
       )
     end)
+  end
+
+  defp function_chunks(content, path) do
+    indexed_lines =
+      content
+      |> String.split("\n")
+      |> Enum.with_index(1)
+
+    function_starts =
+      indexed_lines
+      |> Enum.filter(fn {line, _line_number} -> function_def_line?(line) end)
+      |> Enum.map(fn {_line, line_number} ->
+        %{def_line: line_number, start_line: function_start_line(indexed_lines, line_number)}
+      end)
+
+    total_lines = length(indexed_lines)
+    module_end_line = module_end_line(indexed_lines)
+
+    function_starts
+    |> Enum.with_index()
+    |> Enum.map(fn {%{def_line: def_line, start_line: start_line}, chunk_index} ->
+      next_start_line =
+        function_starts
+        |> Enum.at(chunk_index + 1)
+        |> case do
+          nil -> nil
+          %{start_line: next_start_line} -> next_start_line
+        end
+
+      end_line = function_end_line(next_start_line, module_end_line, total_lines)
+
+      lines = lines_between(indexed_lines, start_line, end_line)
+
+      FileChunk.from_lines(path, lines, chunk_index,
+        id: "#{path}:function:#{chunk_index}",
+        start_line: start_line,
+        end_line: end_line,
+        summary: summarize_function_chunk(path, start_line, end_line, lines, def_line),
+        metadata: %{chunk_strategy: :function, def_line: def_line}
+      )
+    end)
+  end
+
+  defp function_def_line?(line) do
+    Regex.match?(~r/^\s{2}(def|defp|defmacro|defmacrop)\s+/, line)
+  end
+
+  defp function_start_line(indexed_lines, def_line) do
+    indexed_lines
+    |> Enum.filter(fn {_line, line_number} -> line_number < def_line end)
+    |> Enum.reverse()
+    |> Enum.reduce_while(def_line, fn {line, line_number}, start_line ->
+      cond do
+        function_attribute_line?(line) ->
+          {:cont, line_number}
+
+        String.trim(line) == "" ->
+          {:cont, start_line}
+
+        true ->
+          {:halt, start_line}
+      end
+    end)
+  end
+
+  defp function_attribute_line?(line) do
+    Regex.match?(~r/^\s{2}@(impl|doc|spec|callback|macrocallback|deprecated|dialyzer)\b/, line)
+  end
+
+  defp function_end_line(nil, nil, total_lines), do: total_lines
+  defp function_end_line(nil, module_end_line, _total_lines), do: max(module_end_line - 1, 1)
+  defp function_end_line(next_start_line, _module_end_line, _total_lines), do: next_start_line - 1
+
+  defp module_end_line(indexed_lines) do
+    indexed_lines
+    |> Enum.reverse()
+    |> Enum.find_value(fn {line, line_number} ->
+      if String.trim(line) == "end", do: line_number
+    end)
+  end
+
+  defp lines_between(indexed_lines, start_line, end_line) do
+    indexed_lines
+    |> Enum.filter(fn {_line, line_number} ->
+      line_number >= start_line and line_number <= end_line
+    end)
+    |> Enum.map(fn {line, _line_number} -> line end)
+    |> trim_trailing_blank_lines()
+  end
+
+  defp trim_trailing_blank_lines(lines) do
+    lines
+    |> Enum.reverse()
+    |> Enum.drop_while(&(String.trim(&1) == ""))
+    |> Enum.reverse()
   end
 
   defp analyze_content(content, language) when language in ["elixir", "heex"] do
@@ -218,6 +326,22 @@ defmodule Llm.ProjectMemory.Builder do
     case heading do
       nil -> "#{path}:#{start_line}-#{end_line}"
       line -> "#{path}:#{start_line}-#{end_line} around #{String.trim(line)}"
+    end
+  end
+
+  defp summarize_function_chunk(path, start_line, end_line, lines, def_line) do
+    function_heading =
+      lines
+      |> Enum.drop(max(def_line - start_line, 0))
+      |> List.first()
+      |> case do
+        nil -> nil
+        line -> String.trim(line)
+      end
+
+    case function_heading do
+      nil -> "#{path}:#{start_line}-#{end_line}"
+      heading -> "#{path}:#{start_line}-#{end_line} function #{heading}"
     end
   end
 

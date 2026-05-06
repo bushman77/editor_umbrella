@@ -19,8 +19,7 @@ defmodule Llm.LlamaServer do
   # Model / llama.cpp paths
   # ---------------------------------------------------------------------------
 
-  # @model_path "~/.cache/huggingface/hub/models--Qwen--Qwen3-Coder-Next-GGUF/snapshots/b82fb7382639d97b38fa7672e526c760c2fb358e/Qwen3-Coder-Next-Q5_K_M/Qwen3-Coder-Next-Q5_K_M-00001-of-00004.gguf"
-  @model_path "~/models/qwen2.5-coder-7b-instruct-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf"
+  @default_model_path "~/models/qwen2.5-coder-7b-instruct-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf"
   @llama_dir "~/llama.cpp"
   @llama_server_path "build/bin/llama-server"
 
@@ -34,24 +33,15 @@ defmodule Llm.LlamaServer do
   # ---------------------------------------------------------------------------
   # llama-server tuning
   #
-  # RTX 4060 / 8 GB VRAM friendly defaults:
-  #
-  #   * 16k context instead of 65k
-  #   * 2k generation limit instead of 8k
-  #   * GPU layer offload set to auto
-  #   * Flash Attention enabled
-  #
-  # If you want the old heavier settings, change:
-  #
-  #   @context_size 65_536
-  #   @max_tokens 8_192
+  # High-context local defaults. These are intentionally large for slower,
+  # higher-quality editor answers over broad project context.
   # ---------------------------------------------------------------------------
 
   @flash_attention "on"
   @gpu_layers "auto"
   @parallel_slots 1
-  @context_size 65_536
-  @max_tokens 8_192
+  @context_size 32_768
+  @max_tokens 4_096
   @batch_size 2_048
   @micro_batch_size 512
 
@@ -80,7 +70,7 @@ defmodule Llm.LlamaServer do
   end
 
   def status do
-    GenServer.call(__MODULE__, :status)
+    GenServer.call(__MODULE__, :status, :infinity)
   end
 
   def ready? do
@@ -240,8 +230,10 @@ defmodule Llm.LlamaServer do
   # Path / formatting helpers
   # ---------------------------------------------------------------------------
 
-  defp model_path do
-    Path.expand(@model_path)
+  def model_path do
+    :llm
+    |> Application.get_env(:model, @default_model_path)
+    |> Path.expand()
   end
 
   defp llama_dir do

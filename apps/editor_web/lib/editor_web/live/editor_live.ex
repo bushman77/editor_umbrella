@@ -55,6 +55,7 @@ defmodule EditorWeb.EditorLive do
          socket
          |> assign(:cwd, path)
          |> assign(:entries, entries)
+         |> reset_llm_conversation(path)
          |> assign(:error_message, nil)}
 
       {:error, message} ->
@@ -110,7 +111,10 @@ defmodule EditorWeb.EditorLive do
          x: normalize_menu_coordinate(x),
          y: normalize_menu_coordinate(y)
        })
-       |> assign(:rename_file_form, to_form(%{"name" => Path.basename(normalized_path)}, as: :rename_file))
+       |> assign(
+         :rename_file_form,
+         to_form(%{"name" => Path.basename(normalized_path)}, as: :rename_file)
+       )
        |> assign(:error_message, nil)}
     else
       {:noreply, assign(socket, :file_context_menu, nil)}
@@ -201,6 +205,7 @@ defmodule EditorWeb.EditorLive do
          socket
          |> assign(:cwd, path)
          |> assign(:entries, entries)
+         |> reset_llm_conversation(path)
          |> assign(:error_message, nil)}
 
       {:error, message} ->
@@ -246,6 +251,20 @@ defmodule EditorWeb.EditorLive do
   end
 
   @impl true
+  def handle_event("clear_llm_conversation", _params, socket) do
+    Llm.Conversation.delete(socket.assigns.llm_conversation_id)
+
+    {:noreply,
+     socket
+     |> reset_llm_conversation(socket.assigns.cwd)
+     |> assign(:llm_loading?, false)
+     |> assign(:llm_response, nil)
+     |> assign(:llm_context, nil)
+     |> assign(:llm_error, nil)
+     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))}
+  end
+
+  @impl true
   def handle_event("ask_llm", %{"llm" => %{"question" => question}}, socket) do
     trimmed_question = String.trim(question)
 
@@ -263,13 +282,26 @@ defmodule EditorWeb.EditorLive do
 
       true ->
         context_root =
-          related_search_root(socket.assigns.cwd, socket.assigns.selected_file || socket.assigns.cwd)
+          related_search_root(
+            socket.assigns.cwd,
+            socket.assigns.selected_file || socket.assigns.cwd
+          )
+
+        conversation_attrs = llm_conversation_attrs(socket)
+        Llm.Conversation.ensure(socket.assigns.llm_conversation_id, conversation_attrs)
+        recent_messages = Llm.Conversation.recent_messages(socket.assigns.llm_conversation_id)
+        conversation_summary = Llm.Conversation.summary(socket.assigns.llm_conversation_id)
 
         case Llm.build_context(
                context_root,
                socket.assigns.selected_file,
                trimmed_question,
-               related_files: socket.assigns.related_files
+               related_files: socket.assigns.related_files,
+               open_files: socket.assigns.open_tabs,
+               conversation_id: socket.assigns.llm_conversation_id,
+               recent_messages: recent_messages,
+               conversation_summary: conversation_summary,
+               token_budget: 16_384
              ) do
           {:ok, context} ->
             prompt_stats = Llm.Prompts.stats(context.messages)
@@ -284,9 +316,12 @@ defmodule EditorWeb.EditorLive do
                "path" => socket.assigns.selected_file || socket.assigns.cwd,
                "question" => trimmed_question,
                "file_count" => length(context.files),
+               "conversation_id" => socket.assigns.llm_conversation_id,
+               "recent_message_count" => length(recent_messages),
                "prompt_stats" => prompt_stats
              })
              |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))
+             |> assign(:llm_pending_question, trimmed_question)
              |> start_async(:ask_llm, fn -> Llm.chat(context.messages) end)}
 
           {:error, message} ->
@@ -302,10 +337,22 @@ defmodule EditorWeb.EditorLive do
 
   @impl true
   def handle_async(:ask_llm, {:ok, {:ok, response}}, socket) do
+    pending_question = socket.assigns.llm_pending_question || ""
+
+    if pending_question != "" do
+      Llm.Conversation.record_turn(
+        socket.assigns.llm_conversation_id,
+        pending_question,
+        response,
+        llm_conversation_attrs(socket)
+      )
+    end
+
     {:noreply,
      socket
      |> assign(:llm_loading?, false)
      |> assign(:llm_response, response)
+     |> assign(:llm_pending_question, nil)
      |> assign(:llm_error, nil)}
   end
 
@@ -316,6 +363,7 @@ defmodule EditorWeb.EditorLive do
      |> assign(:llm_loading?, false)
      |> assign(:llm_response, nil)
      |> assign(:llm_context, nil)
+     |> assign(:llm_pending_question, nil)
      |> assign(:llm_error, "LLM request failed: #{inspect(reason)}")}
   end
 
@@ -326,6 +374,7 @@ defmodule EditorWeb.EditorLive do
      |> assign(:llm_loading?, false)
      |> assign(:llm_response, nil)
      |> assign(:llm_context, nil)
+     |> assign(:llm_pending_question, nil)
      |> assign(:llm_error, "LLM task crashed: #{inspect(reason)}")}
   end
 
@@ -730,41 +779,52 @@ defmodule EditorWeb.EditorLive do
           <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div
               id="llm-modal"
-              class="flex h-[70vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl"
+              class="llm-crt flex h-[70vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg"
             >
-              <div class="flex items-center justify-between border-b border-base-300 px-4 py-3">
+              <div class="llm-crt-header flex items-center justify-between px-4 py-3">
                 <div class="min-w-0">
-                  <div class="text-sm font-semibold">Ask LLM</div>
-                  <div class="truncate text-xs text-base-content/60">
+                  <div class="llm-crt-title text-sm font-semibold uppercase">Ask LLM</div>
+                  <div class="llm-crt-muted truncate text-xs">
                     {llm_target_label(@cwd, @selected_file)}
                   </div>
                 </div>
 
-                <button
-                  id="close-llm-button"
-                  type="button"
-                  phx-click="close_llm"
-                  class="rounded-md border border-base-300 bg-base-200 px-3 py-2 text-sm transition hover:bg-base-300"
-                >
-                  Close
-                </button>
+                <div class="flex items-center gap-2">
+                  <button
+                    id="clear-llm-conversation-button"
+                    type="button"
+                    phx-click="clear_llm_conversation"
+                    class="llm-crt-button rounded px-3 py-2 text-sm transition"
+                  >
+                    Clear
+                  </button>
+
+                  <button
+                    id="close-llm-button"
+                    type="button"
+                    phx-click="close_llm"
+                    class="llm-crt-button rounded px-3 py-2 text-sm transition"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
 
-              <div class="flex-1 overflow-y-auto px-4 py-4">
+              <div class="llm-crt-body flex-1 overflow-y-auto px-4 py-4">
                 <.form for={@llm_form} id="llm-form" phx-submit="ask_llm" class="space-y-3">
                   <.input
                     field={@llm_form[:question]}
                     id="llm-question"
                     type="text"
                     placeholder="Ask about the current file or folder"
-                    class="w-full rounded-md border border-base-300 bg-base-100 px-3 py-2 text-sm outline-none transition focus:border-primary"
+                    class="llm-crt-input w-full rounded px-3 py-2 text-sm outline-none transition"
                   />
 
                   <div class="flex justify-end">
                     <button
                       id="submit-llm-button"
                       type="submit"
-                      class="rounded-md border border-base-300 bg-base-200 px-3 py-2 text-sm font-medium transition hover:bg-base-300 disabled:cursor-not-allowed disabled:opacity-50"
+                      class="llm-crt-button rounded px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={@llm_loading?}
                     >
                       {if @llm_loading?, do: "Asking...", else: "Ask"}
@@ -775,7 +835,7 @@ defmodule EditorWeb.EditorLive do
                 <div
                   :if={llm_prompt_stats_label(@llm_context)}
                   id="llm-prompt-stats"
-                  class="mt-3 text-xs text-base-content/60"
+                  class="llm-crt-muted mt-3 text-xs"
                 >
                   {llm_prompt_stats_label(@llm_context)}
                 </div>
@@ -783,7 +843,7 @@ defmodule EditorWeb.EditorLive do
                 <%= if @llm_error do %>
                   <div
                     id="llm-error"
-                    class="mt-4 rounded-md border border-error/30 bg-error/10 px-3 py-3 text-sm text-error"
+                    class="llm-crt-error mt-4 rounded px-3 py-3 text-sm"
                   >
                     {@llm_error}
                   </div>
@@ -796,9 +856,9 @@ defmodule EditorWeb.EditorLive do
                         <% {:text, text} -> %>
                           <.markdown_text text={text} />
                         <% {:code, language, code} -> %>
-                          <div class="overflow-hidden rounded-xl border border-base-300 bg-base-200/60">
-                            <div class="flex items-center justify-between border-b border-base-300 px-4 py-2">
-                              <div class="text-xs uppercase tracking-wide text-base-content/60">
+                          <div class="llm-crt-code overflow-hidden rounded">
+                            <div class="llm-crt-code-header flex items-center justify-between px-4 py-2">
+                              <div class="llm-crt-muted text-xs uppercase">
                                 {if language == "", do: "code", else: language}
                               </div>
 
@@ -807,7 +867,7 @@ defmodule EditorWeb.EditorLive do
                                 phx-click={
                                   JS.dispatch("editor:copy", to: "#llm-code-#{code_dom_id(code)}")
                                 }
-                                class="rounded-md border border-base-300 bg-base-100 px-2 py-1 text-xs transition hover:bg-base-300"
+                                class="llm-crt-button rounded px-2 py-1 text-xs transition"
                               >
                                 Copy
                               </button>
@@ -893,7 +953,7 @@ defmodule EditorWeb.EditorLive do
     |> binary_part(0, 12)
   end
 
-  attr :text, :string, required: true
+  attr(:text, :string, required: true)
 
   defp markdown_text(assigns) do
     ~H"""
@@ -926,7 +986,7 @@ defmodule EditorWeb.EditorLive do
     """
   end
 
-  attr :items, :list, required: true
+  attr(:items, :list, required: true)
 
   defp markdown_inlines(assigns) do
     ~H"""
@@ -1073,9 +1133,9 @@ defmodule EditorWeb.EditorLive do
   defp heading_class(2), do: "text-base font-semibold"
   defp heading_class(_level), do: "text-sm font-semibold"
 
-  attr :entry, :map, required: true
-  attr :depth, :integer, required: true
-  attr :selected_file, :string, default: nil
+  attr(:entry, :map, required: true)
+  attr(:depth, :integer, required: true)
+  attr(:selected_file, :string, default: nil)
 
   defp tree_node(assigns) do
     ~H"""
@@ -1150,7 +1210,28 @@ defmodule EditorWeb.EditorLive do
     |> assign(:llm_response, nil)
     |> assign(:llm_context, nil)
     |> assign(:llm_error, nil)
+    |> assign(:llm_conversation_id, new_llm_conversation_id(cwd))
+    |> assign(:llm_pending_question, nil)
     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
+  end
+
+  defp reset_llm_conversation(socket, cwd) do
+    socket
+    |> assign(:llm_conversation_id, new_llm_conversation_id(cwd))
+    |> assign(:llm_pending_question, nil)
+  end
+
+  defp new_llm_conversation_id(cwd) do
+    conversation_id = Llm.Conversation.new_id(cwd)
+    Llm.Conversation.ensure(conversation_id, project_id: cwd)
+    conversation_id
+  end
+
+  defp llm_conversation_attrs(socket) do
+    %{
+      project_id: socket.assigns.cwd,
+      current_file: socket.assigns.selected_file
+    }
   end
 
   defp maybe_restore_selected_file(socket, nil), do: socket
@@ -1186,10 +1267,7 @@ defmodule EditorWeb.EditorLive do
          |> assign(:dirty?, false)
          |> assign(:save_message, nil)
          |> assign(:error_message, nil)
-         |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))
-         |> assign(:llm_response, nil)
-         |> assign(:llm_context, nil)
-         |> assign(:llm_error, nil)}
+         |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))}
 
       {:error, reason} ->
         {:error, "Could not open file: #{:file.format_error(reason)}", socket}
@@ -1260,6 +1338,7 @@ defmodule EditorWeb.EditorLive do
     |> assign(:llm_response, nil)
     |> assign(:llm_context, nil)
     |> assign(:llm_error, nil)
+    |> assign(:llm_pending_question, nil)
     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
   end
 
@@ -1389,7 +1468,8 @@ defmodule EditorWeb.EditorLive do
         {:noreply, assign(socket, :error_message, message)}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :error_message, "Could not create folder: #{format_reason(reason)}")}
+        {:noreply,
+         assign(socket, :error_message, "Could not create folder: #{format_reason(reason)}")}
     end
   end
 
@@ -1415,7 +1495,8 @@ defmodule EditorWeb.EditorLive do
         {:noreply, assign(socket, :error_message, message)}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :error_message, "Could not create file: #{format_reason(reason)}")}
+        {:noreply,
+         assign(socket, :error_message, "Could not create file: #{format_reason(reason)}")}
     end
   end
 
@@ -1434,7 +1515,11 @@ defmodule EditorWeb.EditorLive do
 
       {:error, reason} ->
         {:noreply,
-         assign(socket, :error_message, "Could not delete folder: #{format_delete_reason(reason)}")}
+         assign(
+           socket,
+           :error_message,
+           "Could not delete folder: #{format_delete_reason(reason)}"
+         )}
     end
   end
 
@@ -1463,7 +1548,8 @@ defmodule EditorWeb.EditorLive do
         {:noreply, assign(socket, :error_message, message)}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :error_message, "Could not rename file: #{format_reason(reason)}")}
+        {:noreply,
+         assign(socket, :error_message, "Could not rename file: #{format_reason(reason)}")}
     end
   end
 
@@ -1482,7 +1568,8 @@ defmodule EditorWeb.EditorLive do
         {:noreply, assign(socket, :error_message, message)}
 
       {:error, reason} ->
-        {:noreply, assign(socket, :error_message, "Could not delete file: #{format_reason(reason)}")}
+        {:noreply,
+         assign(socket, :error_message, "Could not delete file: #{format_reason(reason)}")}
     end
   end
 
@@ -1583,7 +1670,9 @@ defmodule EditorWeb.EditorLive do
   defp format_reason(reason) when is_atom(reason), do: :file.format_error(reason)
   defp format_reason(reason), do: inspect(reason)
 
-  defp format_delete_reason(reason) when reason in [:eexist, :enotempty], do: "folder is not empty"
+  defp format_delete_reason(reason) when reason in [:eexist, :enotempty],
+    do: "folder is not empty"
+
   defp format_delete_reason(reason), do: format_reason(reason)
 
   defp add_open_tab(open_tabs, path) do
@@ -1683,7 +1772,9 @@ defmodule EditorWeb.EditorLive do
   defp function_name_from_definition([{name, _meta, _args} | _rest]) when is_atom(name),
     do: Atom.to_string(name)
 
-  defp function_name_from_definition([{:when, _meta, [{name, _name_meta, _args} | _guards]} | _rest])
+  defp function_name_from_definition([
+         {:when, _meta, [{name, _name_meta, _args} | _guards]} | _rest
+       ])
        when is_atom(name),
        do: Atom.to_string(name)
 

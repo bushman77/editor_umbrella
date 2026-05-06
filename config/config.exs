@@ -26,6 +26,10 @@ config :editor_web,
   ecto_repos: [Editor.Repo],
   generators: [context_app: :editor]
 
+config :llm,
+  enabled: true,
+  model: "~/models/Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf"
+
 # Configures the endpoint
 config :editor_web, EditorWeb.Endpoint,
   url: [host: "localhost"],

@@ -58,6 +58,7 @@ defmodule EditorWeb.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 0.26"},
       {:editor, in_umbrella: true},
+      {:llm, in_umbrella: true},
       {:jason, "~> 1.2"},
       {:bandit, "~> 1.5"}
     ]
