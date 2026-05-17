@@ -811,7 +811,10 @@ defmodule LlmTest do
       |> Enum.join("\n")
 
     assert system_prompt =~ "Refactor output contract"
-    assert system_prompt =~ "Do not refuse because a supporting snippet has unknown or partial line ranges"
+
+    assert system_prompt =~
+             "Do not refuse because a supporting snippet has unknown or partial line ranges"
+
     refute system_prompt =~ "Implementation request contract"
     refute system_prompt =~ "No patch from provided context"
   end

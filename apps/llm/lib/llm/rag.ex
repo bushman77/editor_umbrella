@@ -26,6 +26,7 @@ defmodule Llm.Rag do
   def build_context(root_path, selected_file, question, opts \\ [])
       when is_binary(root_path) and is_binary(question) and is_list(opts) do
     related_files = Keyword.get(opts, :related_files, [])
+
     related_file_specs =
       normalize_related_file_specs(Keyword.get(opts, :related_file_specs, []))
 
@@ -43,7 +44,8 @@ defmodule Llm.Rag do
            ensure_related_files_memory(project_memory, root_path, related_files),
          {:ok, project_memory} <-
            ensure_related_files_memory(project_memory, root_path, open_files),
-         extra_refs = refs_for_related_files(project_memory, root_path, related_files, related_file_specs),
+         extra_refs =
+           refs_for_related_files(project_memory, root_path, related_files, related_file_specs),
          open_refs = refs_for_open_files(project_memory, root_path, open_files),
          pack <-
            ContextPack.Builder.build(project_memory, %{
@@ -190,6 +192,7 @@ defmodule Llm.Rag do
   defp normalize_related_file_specs(_related_file_specs), do: []
 
   defp related_file_paths(related_files, []), do: related_files
+
   defp related_file_paths(_related_files, related_file_specs),
     do: Enum.map(related_file_specs, & &1.path)
 

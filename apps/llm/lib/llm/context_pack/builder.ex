@@ -131,6 +131,7 @@ defmodule Llm.ContextPack.Builder do
 
     extra_refs = normalize_refs(Map.get(opts, :extra_refs, []))
     open_refs = normalize_refs(Map.get(opts, :open_refs, []))
+
     related_file_spec_paths =
       opts
       |> Map.get(:related_file_specs, [])

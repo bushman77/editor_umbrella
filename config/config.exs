@@ -30,6 +30,7 @@ config :llm,
   enabled: true,
   model: "~/models/Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf"
 
+#    "~/models/qwen3-coder-next/Qwen3-Coder-Next-Q5_K_M/Qwen3-Coder-Next-Q5_K_M-00001-of-00004.gguf"
 # Configures the endpoint
 config :editor_web, EditorWeb.Endpoint,
   url: [host: "localhost"],

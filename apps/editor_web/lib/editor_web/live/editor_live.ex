@@ -1,12 +1,28 @@
 defmodule EditorWeb.EditorLive do
   use EditorWeb, :live_view
 
+  alias EditorWeb.EditorLlm
+  alias EditorWeb.EditorState
+  alias EditorWeb.EditorWorkspace, as: Workspace
+
+  import EditorWeb.EditorWorkspace,
+    only: [
+      ensure_within_workspace: 2,
+      ensure_workspace_file: 2,
+      matching_file_paths: 2,
+      related_search_root: 3
+    ]
+
   @indent_px 14
 
   @impl true
   def mount(_params, _session, socket) do
-    default_cwd = File.cwd!()
+    workspace_root = Path.expand(File.cwd!())
     connect_params = get_connect_params(socket) || %{}
+
+    if connected?(socket) do
+      Editor.OpenFileCache.subscribe()
+    end
 
     stored_folder_path =
       case connect_params do
@@ -28,12 +44,12 @@ defmodule EditorWeb.EditorLive do
 
     cwd =
       stored_folder_path
-      |> normalize_path(default_cwd)
-      |> validate_cwd(default_cwd)
+      |> normalize_path(workspace_root)
+      |> validate_cwd(workspace_root, workspace_root)
 
     socket =
       socket
-      |> base_assigns(cwd)
+      |> base_assigns(workspace_root, cwd)
       |> maybe_restore_selected_file(stored_file_path)
       |> restore_llm_state(stored_llm_modal_open)
 
@@ -49,7 +65,7 @@ defmodule EditorWeb.EditorLive do
       |> assign(:form, to_form(%{"folder_path" => path}, as: :explorer))
       |> clear_editor()
 
-    case load_entries_result(path) do
+    case load_entries_result(path, socket.assigns.workspace_root) do
       {:ok, entries} ->
         {:noreply,
          socket
@@ -65,7 +81,7 @@ defmodule EditorWeb.EditorLive do
 
   @impl true
   def handle_event("toggle_dir", %{"path" => path}, socket) do
-    case toggle_directory(socket.assigns.entries, path) do
+    case toggle_directory(socket.assigns.entries, path, socket.assigns.workspace_root) do
       {:ok, entries} ->
         {:noreply,
          socket
@@ -199,7 +215,7 @@ defmodule EditorWeb.EditorLive do
       |> assign(:form, to_form(%{"folder_path" => path}, as: :explorer))
       |> clear_editor()
 
-    case load_entries_result(path) do
+    case load_entries_result(path, socket.assigns.workspace_root) do
       {:ok, entries} ->
         {:noreply,
          socket
@@ -215,12 +231,9 @@ defmodule EditorWeb.EditorLive do
 
   @impl true
   def handle_event("edit_file", %{"editor" => %{"content" => content}}, socket) do
-    {:noreply,
-     socket
-     |> assign(:file_content, content)
-     |> assign(:dirty?, content != socket.assigns.saved_content)
-     |> assign(:save_message, nil)
-     |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))}
+    EditorState.cache_selected_file(socket, content)
+
+    {:noreply, EditorState.apply_edit(socket, content)}
   end
 
   @impl true
@@ -252,15 +265,19 @@ defmodule EditorWeb.EditorLive do
 
   @impl true
   def handle_event("clear_llm_conversation", _params, socket) do
+    cwd = socket.assigns.cwd
+
     Llm.Conversation.delete(socket.assigns.llm_conversation_id)
+    Llm.reset_agent_session(cwd)
 
     {:noreply,
      socket
-     |> reset_llm_conversation(socket.assigns.cwd)
+     |> reset_llm_conversation(cwd)
      |> assign(:llm_loading?, false)
      |> assign(:llm_response, nil)
      |> assign(:llm_context, nil)
      |> assign(:llm_error, nil)
+     |> assign(:llm_pending_question, nil)
      |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))}
   end
 
@@ -292,117 +309,43 @@ defmodule EditorWeb.EditorLive do
 
   @impl true
   def handle_event("ask_llm", %{"llm" => %{"question" => question}}, socket) do
-    trimmed_question = String.trim(question)
-
-    cond do
-      socket.assigns.llm_loading? ->
+    case EditorLlm.prepare_request(socket.assigns, question) do
+      {:noop, :loading} ->
         {:noreply, socket}
 
-      trimmed_question == "" ->
+      {:error, socket_updates} ->
+        {:noreply, EditorLlm.apply_updates(socket, socket_updates)}
+
+      {:ok, prepared} ->
+        request_assigns = socket.assigns
+        trimmed_question = String.trim(question || "")
+
         {:noreply,
          socket
-         |> assign(:llm_error, "Enter a question.")
-         |> assign(:llm_response, nil)
-         |> assign(:llm_context, nil)
-         |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))}
-
-      true ->
-        context_root =
-          related_search_root(
-            socket.assigns.cwd,
-            socket.assigns.selected_file || socket.assigns.cwd
-          )
-
-        conversation_attrs = llm_conversation_attrs(socket)
-        Llm.Conversation.ensure(socket.assigns.llm_conversation_id, conversation_attrs)
-        recent_messages = Llm.Conversation.recent_messages(socket.assigns.llm_conversation_id)
-        conversation_summary = Llm.Conversation.summary(socket.assigns.llm_conversation_id)
-
-        case Llm.build_context(
-               context_root,
-               socket.assigns.selected_file,
-               trimmed_question,
-               related_files: llm_related_files(socket),
-               related_file_specs: llm_related_file_specs(socket),
-               open_files: socket.assigns.open_tabs,
-               conversation_id: socket.assigns.llm_conversation_id,
-               recent_messages: recent_messages,
-               conversation_summary: conversation_summary,
-               token_budget: 16_384
-             ) do
-          {:ok, context} ->
-            prompt_stats = Llm.Prompts.stats(context.messages)
-
-            {:noreply,
-             socket
-             |> assign(:llm_loading?, true)
-             |> assign(:llm_error, nil)
-             |> assign(:llm_response, nil)
-             |> assign(:llm_context, %{
-               "mode" => Atom.to_string(context.mode),
-               "path" => socket.assigns.selected_file || socket.assigns.cwd,
-               "question" => trimmed_question,
-               "file_count" => length(context.files),
-               "conversation_id" => socket.assigns.llm_conversation_id,
-               "recent_message_count" => length(recent_messages),
-               "prompt_stats" => prompt_stats
-             })
-             |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))
-             |> assign(:llm_pending_question, trimmed_question)
-             |> start_async(:ask_llm, fn -> Llm.chat(context.messages) end)}
-
-          {:error, message} ->
-            {:noreply,
-             socket
-             |> assign(:llm_error, message)
-             |> assign(:llm_response, nil)
-             |> assign(:llm_context, nil)
-             |> assign(:llm_form, to_form(%{"question" => question}, as: :llm))}
-        end
+         |> EditorLlm.apply_updates(prepared.socket_updates)
+         |> start_async(:ask_llm, fn ->
+           EditorLlm.agent_chat(request_assigns, trimmed_question)
+         end)}
     end
-  end
-
-  @impl true
-  def handle_async(:ask_llm, {:ok, {:ok, response}}, socket) do
-    pending_question = socket.assigns.llm_pending_question || ""
-
-    if pending_question != "" do
-      Llm.Conversation.record_turn(
-        socket.assigns.llm_conversation_id,
-        pending_question,
-        response,
-        llm_conversation_attrs(socket)
-      )
-    end
-
-    {:noreply,
-     socket
-     |> assign(:llm_loading?, false)
-     |> assign(:llm_response, response)
-     |> assign(:llm_pending_question, nil)
-     |> assign(:llm_error, nil)}
   end
 
   @impl true
   def handle_async(:ask_llm, {:ok, {:error, reason}}, socket) do
-    {:noreply,
-     socket
-     |> assign(:llm_loading?, false)
-     |> assign(:llm_response, nil)
-     |> assign(:llm_context, nil)
-     |> assign(:llm_pending_question, nil)
-     |> assign(:llm_error, "LLM request failed: #{inspect(reason)}")}
+    {:noreply, EditorLlm.handle_failure(socket, :request_failed, reason)}
   end
 
   @impl true
-  def handle_async(:ask_llm, {:exit, reason}, socket) do
-    {:noreply,
-     socket
-     |> assign(:llm_loading?, false)
-     |> assign(:llm_response, nil)
-     |> assign(:llm_context, nil)
-     |> assign(:llm_pending_question, nil)
-     |> assign(:llm_error, "LLM task crashed: #{inspect(reason)}")}
+  def handle_async(
+        :ask_llm,
+        {:ok, {:ok, %{response: response, llm_context: llm_context}}},
+        socket
+      ) do
+    {:noreply, EditorLlm.handle_success(socket, response, llm_context)}
+  end
+
+  @impl true
+  def handle_info({:open_files_updated, cached_open_files}, socket) do
+    {:noreply, assign(socket, :cached_open_files, cached_open_files)}
   end
 
   @impl true
@@ -863,7 +806,7 @@ defmodule EditorWeb.EditorLive do
                       id={"related-file-functions-#{file_tab_dom_id(path)}"}
                       class="mt-1 flex flex-wrap gap-1"
                     >
-                      <%= for function <- related_file_functions(path) do %>
+                      <%= for function <- related_file_functions(@selected_file, path) do %>
                         <span
                           class="max-w-full truncate rounded bg-neutral-content/10 px-1.5 py-0.5 font-mono"
                           title={"#{function.head} (lines #{function.start_line}-#{function.end_line})"}
@@ -872,7 +815,7 @@ defmodule EditorWeb.EditorLive do
                         </span>
                       <% end %>
                       <span
-                        :if={related_file_functions(path) == []}
+                        :if={related_file_functions(@selected_file, path) == []}
                         class="text-neutral-content/60"
                       >
                         None found
@@ -938,7 +881,7 @@ defmodule EditorWeb.EditorLive do
                 <div class="min-w-0">
                   <div class="llm-crt-title text-sm font-semibold uppercase">Ask LLM</div>
                   <div class="llm-crt-muted truncate text-xs">
-                    {llm_target_label(@cwd, @selected_file)}
+                    {EditorLlm.target_label(@cwd, @selected_file)}
                   </div>
                 </div>
 
@@ -986,11 +929,11 @@ defmodule EditorWeb.EditorLive do
                 </.form>
 
                 <div
-                  :if={llm_prompt_stats_label(@llm_context)}
+                  :if={EditorLlm.prompt_stats_label(@llm_context)}
                   id="llm-prompt-stats"
                   class="llm-crt-muted mt-3 text-xs"
                 >
-                  {llm_prompt_stats_label(@llm_context)}
+                  {EditorLlm.prompt_stats_label(@llm_context)}
                 </div>
 
                 <%= if @llm_error do %>
@@ -1004,7 +947,7 @@ defmodule EditorWeb.EditorLive do
 
                 <%= if @llm_response do %>
                   <div id="llm-response" class="mt-4 space-y-4">
-                    <%= for segment <- llm_response_segments(@llm_response) do %>
+                    <%= for segment <- EditorLlm.response_segments(@llm_response) do %>
                       <%= case segment do %>
                         <% {:text, text} -> %>
                           <.markdown_text text={text} />
@@ -1044,60 +987,6 @@ defmodule EditorWeb.EditorLive do
       </main>
     </Layouts.app>
     """
-  end
-
-  defp llm_response_segments(nil), do: []
-
-  defp llm_response_segments(response) when is_binary(response) do
-    parse_llm_response(String.split(response, "\n", trim: false), [], [], nil)
-    |> Enum.reverse()
-    |> Enum.reject(fn
-      {:text, text} -> String.trim(text) == ""
-      {:code, _language, code} -> String.trim(code) == ""
-    end)
-  end
-
-  defp parse_llm_response([], current_lines, segments, nil) do
-    text = Enum.reverse(current_lines) |> Enum.join("\n")
-
-    if text == "" do
-      segments
-    else
-      [{:text, text} | segments]
-    end
-  end
-
-  defp parse_llm_response([], current_lines, segments, language) do
-    code = Enum.reverse(current_lines) |> Enum.join("\n")
-    [{:code, language, code} | segments]
-  end
-
-  defp parse_llm_response([line | rest], current_lines, segments, nil) do
-    case Regex.run(~r/^```([\w+-]*)\s*$/, line) do
-      [_, language] ->
-        text = Enum.reverse(current_lines) |> Enum.join("\n")
-
-        new_segments =
-          if text == "" do
-            segments
-          else
-            [{:text, text} | segments]
-          end
-
-        parse_llm_response(rest, [], new_segments, language)
-
-      nil ->
-        parse_llm_response(rest, [line | current_lines], segments, nil)
-    end
-  end
-
-  defp parse_llm_response([line | rest], current_lines, segments, language) do
-    if String.trim(line) == "```" do
-      code = Enum.reverse(current_lines) |> Enum.join("\n")
-      parse_llm_response(rest, [], [{:code, language, code} | segments], nil)
-    else
-      parse_llm_response(rest, [line | current_lines], segments, language)
-    end
   end
 
   defp code_dom_id(code) do
@@ -1337,22 +1226,13 @@ defmodule EditorWeb.EditorLive do
     """
   end
 
-  defp base_assigns(socket, cwd) do
+  defp base_assigns(socket, workspace_root, cwd) do
     socket
     |> assign(:current_scope, nil)
+    |> assign(:workspace_root, workspace_root)
     |> assign(:cwd, cwd)
-    |> assign(:entries, load_entries(cwd))
-    |> assign(:selected_file, nil)
-    |> assign(:open_tabs, [])
-    |> assign(:related_files, [])
-    |> assign(:related_files_collapsed?, true)
-    |> assign(:show_discovery_related_files?, false)
-    |> assign(:related_file_context_overrides, %{})
-    |> assign(:file_content, "")
-    |> assign(:saved_content, "")
-    |> assign(:dirty?, false)
-    |> assign(:error_message, nil)
-    |> assign(:save_message, nil)
+    |> assign(:entries, load_entries(cwd, workspace_root))
+    |> EditorState.assign_defaults()
     |> assign(:folder_context_menu, nil)
     |> assign(:file_context_menu, nil)
     |> assign(:new_folder_form, to_form(%{"name" => ""}, as: :folder_action))
@@ -1361,135 +1241,52 @@ defmodule EditorWeb.EditorLive do
     |> assign(:file_search_form, to_form(%{"pattern" => ""}, as: :file_search))
     |> assign(:form, to_form(%{"folder_path" => cwd}, as: :explorer))
     |> assign(:editor_form, to_form(%{"content" => ""}, as: :editor))
-    |> assign(:llm_modal_open?, false)
-    |> assign(:llm_loading?, false)
-    |> assign(:llm_response, nil)
-    |> assign(:llm_context, nil)
-    |> assign(:llm_error, nil)
-    |> assign(:llm_conversation_id, new_llm_conversation_id(cwd))
-    |> assign(:llm_pending_question, nil)
-    |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
+    |> EditorLlm.assign_defaults(cwd)
   end
 
-  defp reset_llm_conversation(socket, cwd) do
-    socket
-    |> assign(:llm_conversation_id, new_llm_conversation_id(cwd))
-    |> assign(:llm_pending_question, nil)
-  end
-
-  defp new_llm_conversation_id(cwd) do
-    conversation_id = Llm.Conversation.new_id(cwd)
-    Llm.Conversation.ensure(conversation_id, project_id: cwd)
-    conversation_id
-  end
-
-  defp llm_conversation_attrs(socket) do
-    %{
-      project_id: socket.assigns.cwd,
-      current_file: socket.assigns.selected_file
-    }
-  end
+  defp reset_llm_conversation(socket, cwd), do: EditorLlm.reset_conversation(socket, cwd)
 
   defp maybe_restore_selected_file(socket, nil), do: socket
 
   defp maybe_restore_selected_file(socket, path) do
     normalized_path = normalize_path(path, socket.assigns.cwd)
 
-    cond do
-      not File.regular?(normalized_path) ->
-        socket
-
-      not String.starts_with?(normalized_path, socket.assigns.cwd) ->
-        socket
-
-      true ->
+    case ensure_workspace_file(normalized_path, socket.assigns.workspace_root) do
+      {:ok, normalized_path} ->
         case load_file_into_socket(socket, normalized_path) do
           {:ok, socket} -> socket
           {:error, _message, socket} -> socket
         end
+
+      {:error, _message} ->
+        socket
     end
   end
 
   defp load_file_into_socket(socket, path) do
-    case File.read(path) do
-      {:ok, content} ->
-        {:ok,
-         socket
-         |> assign(:selected_file, path)
-         |> assign(:open_tabs, add_open_tab(socket.assigns.open_tabs, path))
-         |> assign(:related_files, related_file_paths(socket.assigns.cwd, path, content))
-         |> assign(:related_file_context_overrides, %{})
-         |> assign(:file_content, content)
-         |> assign(:saved_content, content)
-         |> assign(:dirty?, false)
-         |> assign(:save_message, nil)
-         |> assign(:error_message, nil)
-         |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))}
+    with {:ok, path} <- ensure_workspace_file(path, socket.assigns.workspace_root),
+         {:ok, content} <- File.read(path) do
+      EditorState.cache_file(path, content)
+
+      related_files =
+        related_file_paths(socket.assigns.cwd, path, content, socket.assigns.workspace_root)
+
+      {:ok, EditorState.open_file(socket, path, content, related_files)}
+    else
+      {:error, message} when is_binary(message) ->
+        {:error, message, socket}
 
       {:error, reason} ->
         {:error, "Could not open file: #{:file.format_error(reason)}", socket}
     end
   end
 
-  defp toggle_directory(entries, path) do
-    do_toggle_directory(entries, path)
-  end
-
-  defp do_toggle_directory(entries, path) do
-    Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
-      cond do
-        entry.type == :directory and entry.path == path ->
-          case toggle_entry(entry) do
-            {:ok, updated_entry} ->
-              {:cont, {:ok, [updated_entry | acc]}}
-
-            {:error, message} ->
-              {:halt, {:error, message}}
-          end
-
-        entry.type == :directory ->
-          case do_toggle_directory(entry.children, path) do
-            {:ok, children} ->
-              {:cont, {:ok, [%{entry | children: children} | acc]}}
-
-            {:error, message} ->
-              {:halt, {:error, message}}
-          end
-
-        true ->
-          {:cont, {:ok, [entry | acc]}}
-      end
-    end)
-    |> case do
-      {:ok, updated_entries} -> {:ok, Enum.reverse(updated_entries)}
-      {:error, message} -> {:error, message}
-    end
-  end
-
-  defp toggle_entry(entry) do
-    if entry.expanded? do
-      {:ok, %{entry | expanded?: false}}
-    else
-      case load_entries_result(entry.path) do
-        {:ok, children} ->
-          {:ok, %{entry | expanded?: true, children: children}}
-
-        {:error, message} ->
-          {:error, message}
-      end
-    end
-  end
+  defp toggle_directory(entries, path, workspace_root),
+    do: Workspace.toggle_directory(entries, path, workspace_root)
 
   defp clear_editor(socket) do
     socket
-    |> assign(:selected_file, nil)
-    |> assign(:open_tabs, [])
-    |> assign(:related_files, [])
-    |> assign(:file_content, "")
-    |> assign(:saved_content, "")
-    |> assign(:dirty?, false)
-    |> assign(:save_message, nil)
-    |> assign(:editor_form, to_form(%{"content" => ""}, as: :editor))
+    |> EditorState.clear()
     |> assign(:llm_modal_open?, false)
     |> assign(:llm_loading?, false)
     |> assign(:llm_response, nil)
@@ -1499,94 +1296,18 @@ defmodule EditorWeb.EditorLive do
     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
   end
 
-  defp load_entries(path) do
-    case load_entries_result(path) do
-      {:ok, entries} -> entries
-      {:error, _message} -> []
-    end
-  end
+  defp load_entries(path, workspace_root), do: Workspace.load_entries(path, workspace_root)
 
-  defp load_entries_result(path) do
-    cond do
-      path == "" ->
-        {:error, "Enter a folder path."}
+  defp load_entries_result(path, workspace_root),
+    do: Workspace.load_entries_result(path, workspace_root)
 
-      not File.dir?(path) ->
-        {:error, "Not a directory: #{path}"}
+  defp normalize_path(path, current_path), do: Workspace.normalize_path(path, current_path)
 
-      true ->
-        case File.ls(path) do
-          {:ok, names} ->
-            entries =
-              names
-              |> Enum.reduce([], fn name, acc ->
-                full_path = Path.join(path, name)
+  defp validate_cwd(path, default_cwd, workspace_root),
+    do: Workspace.validate_cwd(path, default_cwd, workspace_root)
 
-                case File.stat(full_path) do
-                  {:ok, stat} ->
-                    [entry_from_stat(name, full_path, stat.type) | acc]
-
-                  {:error, _reason} ->
-                    acc
-                end
-              end)
-              |> Enum.sort_by(fn entry ->
-                {entry.type != :directory, String.downcase(entry.name)}
-              end)
-
-            {:ok, entries}
-
-          {:error, reason} ->
-            {:error, "Could not read directory: #{:file.format_error(reason)}"}
-        end
-    end
-  end
-
-  defp entry_from_stat(name, full_path, type) do
-    %{
-      name: name,
-      path: full_path,
-      type: type,
-      dom_id: Base.url_encode64(full_path, padding: false),
-      expanded?: false,
-      children: []
-    }
-  end
-
-  defp normalize_path(path, current_path) when is_nil(path), do: current_path
-
-  defp normalize_path(path, current_path) do
-    trimmed =
-      path
-      |> String.trim()
-      |> String.replace("\\", "/")
-
-    cond do
-      trimmed == "" ->
-        current_path
-
-      trimmed == "~" or String.starts_with?(trimmed, "~/") ->
-        Path.expand(trimmed)
-
-      Path.type(trimmed) == :absolute ->
-        Path.expand(trimmed)
-
-      true ->
-        Path.expand(trimmed, current_path)
-    end
-  end
-
-  defp validate_cwd(path, default_cwd) do
-    if is_binary(path) and File.dir?(path) do
-      path
-    else
-      default_cwd
-    end
-  end
-
-  defp restore_llm_state(socket, modal_open?) do
-    assign(socket, :llm_modal_open?, modal_open?)
-  end
+  defp restore_llm_state(socket, modal_open?),
+    do: EditorLlm.restore_modal_state(socket, modal_open?)
 
   defp search_file_pattern(socket, pattern) do
     trimmed_pattern = String.trim(pattern || "")
@@ -1600,12 +1321,20 @@ defmodule EditorWeb.EditorLive do
          |> assign(:error_message, "Enter a search pattern.")}
 
       true ->
-        search_root = related_search_root(socket.assigns.cwd, socket.assigns.cwd)
+        search_root =
+          related_search_root(
+            socket.assigns.cwd,
+            socket.assigns.cwd,
+            socket.assigns.workspace_root
+          )
+
         matches = matching_file_paths(search_root, trimmed_pattern)
 
         {:noreply,
          socket
          |> assign(:related_files, matches)
+         |> assign(:related_files_collapsed?, false)
+         |> assign(:show_discovery_related_files?, true)
          |> assign(:file_search_form, to_form(%{"pattern" => pattern}, as: :file_search))
          |> assign(:error_message, nil)}
     end
@@ -1750,29 +1479,15 @@ defmodule EditorWeb.EditorLive do
 
   defp context_menu_file(_socket), do: {:error, "Right-click a file first."}
 
-  defp context_folder?(socket, path) do
-    File.dir?(path) and path_within_root?(path, socket.assigns.cwd)
-  end
+  defp context_folder?(socket, path),
+    do: Workspace.context_folder?(path, socket.assigns.workspace_root)
 
-  defp context_file?(socket, path) do
-    File.regular?(path) and path_within_root?(path, socket.assigns.cwd)
-  end
+  defp context_file?(socket, path),
+    do: Workspace.context_file?(path, socket.assigns.workspace_root)
 
-  defp child_path(parent_path, name) do
-    trimmed_name = String.trim(name || "")
+  defp child_path(parent_path, name), do: Workspace.child_path(parent_path, name)
 
-    if valid_child_name?(trimmed_name) do
-      {:ok, Path.expand(trimmed_name, parent_path)}
-    else
-      {:error, "Use a file or folder name without slashes."}
-    end
-  end
-
-  defp sibling_path(path, name), do: child_path(Path.dirname(path), name)
-
-  defp valid_child_name?(name) do
-    name != "" and name not in [".", ".."] and not String.contains?(name, ["/", "\\"])
-  end
+  defp sibling_path(path, name), do: Workspace.sibling_path(path, name)
 
   defp ensure_file_can_change(socket, path, action) do
     if socket.assigns.selected_file == path and socket.assigns.dirty? do
@@ -1782,18 +1497,10 @@ defmodule EditorWeb.EditorLive do
     end
   end
 
-  defp ensure_not_root_folder(socket, path) do
-    if Path.expand(path) == Path.expand(socket.assigns.cwd) do
-      {:error, "The current workspace root cannot be deleted from the context menu."}
-    else
-      :ok
-    end
-  end
+  defp ensure_not_root_folder(socket, path),
+    do: Workspace.ensure_not_root_folder(path, socket.assigns.workspace_root)
 
-  defp path_within_root?(path, root_path) do
-    relative_path = Path.relative_to(Path.expand(path), Path.expand(root_path))
-    not String.starts_with?(relative_path, "..")
-  end
+  defp path_within_root?(path, root_path), do: Workspace.path_within_root?(path, root_path)
 
   defp normalize_menu_coordinate(value) when is_integer(value), do: max(value, 0)
 
@@ -1806,21 +1513,19 @@ defmodule EditorWeb.EditorLive do
 
   defp normalize_menu_coordinate(_value), do: 0
 
-  defp refresh_explorer(socket), do: assign(socket, :entries, load_entries(socket.assigns.cwd))
+  defp refresh_explorer(socket),
+    do:
+      assign(
+        socket,
+        :entries,
+        Workspace.load_entries(socket.assigns.cwd, socket.assigns.workspace_root)
+      )
 
-  defp replace_open_tab_path(socket, old_path, new_path) do
-    open_tabs =
-      Enum.map(socket.assigns.open_tabs, fn
-        ^old_path -> new_path
-        path -> path
-      end)
+  defp replace_open_tab_path(socket, old_path, new_path),
+    do: EditorState.replace_open_tab_path(socket, old_path, new_path)
 
-    assign(socket, :open_tabs, open_tabs)
-  end
-
-  defp close_deleted_file(socket, path) do
-    close_file_tab(socket, path)
-  end
+  defp close_deleted_file(socket, path),
+    do: EditorState.close_file_tab(socket, path, &load_file_into_socket/2, &clear_editor/1)
 
   defp format_reason(:eexist), do: "already exists"
   defp format_reason(:enotempty), do: "folder is not empty"
@@ -1832,40 +1537,8 @@ defmodule EditorWeb.EditorLive do
 
   defp format_delete_reason(reason), do: format_reason(reason)
 
-  defp add_open_tab(open_tabs, path) do
-    if path in open_tabs do
-      open_tabs
-    else
-      open_tabs ++ [path]
-    end
-  end
-
-  defp close_file_tab(socket, path) do
-    open_tabs = socket.assigns.open_tabs
-    remaining_tabs = Enum.reject(open_tabs, &(&1 == path))
-
-    cond do
-      socket.assigns.selected_file != path ->
-        assign(socket, :open_tabs, remaining_tabs)
-
-      remaining_tabs == [] ->
-        clear_editor(socket)
-
-      true ->
-        next_path = next_open_tab(open_tabs, remaining_tabs, path)
-
-        case load_file_into_socket(assign(socket, :open_tabs, remaining_tabs), next_path) do
-          {:ok, socket} -> socket
-          {:error, message, socket} -> assign(socket, :error_message, message)
-        end
-    end
-  end
-
-  defp next_open_tab(open_tabs, remaining_tabs, closed_path) do
-    closed_index = Enum.find_index(open_tabs, &(&1 == closed_path)) || 0
-    next_index = min(closed_index, length(remaining_tabs) - 1)
-    Enum.at(remaining_tabs, next_index)
-  end
+  defp close_file_tab(socket, path),
+    do: EditorState.close_file_tab(socket, path, &load_file_into_socket/2, &clear_editor/1)
 
   defp file_tab_dom_id(path) do
     :crypto.hash(:sha256, path)
@@ -1875,12 +1548,13 @@ defmodule EditorWeb.EditorLive do
 
   defp open_tab_label(path), do: Path.basename(path)
 
-  defp related_file_paths(cwd, selected_path, content) do
-    search_root = related_search_root(cwd, selected_path)
+  defp related_file_paths(cwd, selected_path, content, workspace_root) do
+    search_root = related_search_root(cwd, selected_path, workspace_root)
 
     selected_path
     |> Llm.ContextBuilder.related_file_paths_for_refactor(content, "", search_root)
     |> Enum.reject(&(&1 == selected_path))
+    |> Enum.filter(&path_within_root?(&1, workspace_root))
   end
 
   defp related_file_label(_cwd, path), do: Path.basename(path)
@@ -1894,238 +1568,20 @@ defmodule EditorWeb.EditorLive do
     Enum.filter(related_files, &strong_related_file?(selected_path, &1))
   end
 
-  defp llm_related_files(%{
-         assigns: %{
-           selected_file: selected_file,
-           related_files: related_files,
-           related_file_context_overrides: overrides
-         }
-       })
-       when is_binary(selected_file) and is_list(related_files) and is_map(overrides) do
-    Enum.filter(related_files, &related_file_included?(selected_file, &1, overrides))
-  end
+  defp related_file_included?(socket, path),
+    do: EditorLlm.related_file_included?(socket.assigns, path)
 
-  defp llm_related_files(%{assigns: %{related_files: related_files}}) when is_list(related_files) do
-    related_files
-  end
+  defp related_file_included?(selected_path, path, overrides),
+    do: EditorLlm.related_file_included?(selected_path, path, overrides)
 
-  defp llm_related_file_specs(%{
-         assigns: %{
-           selected_file: selected_file,
-           related_files: related_files,
-           related_file_context_overrides: overrides
-         }
-       })
-       when is_binary(selected_file) and is_list(related_files) and is_map(overrides) do
-    related_files
-    |> Enum.filter(&related_file_included?(selected_file, &1, overrides))
-    |> Enum.map(fn path ->
-      %{
-        path: path,
-        relationship: related_file_reason(selected_file, path),
-        included?: true,
-        functions: related_file_public_contracts(path)
-      }
-    end)
-  end
+  defp strong_related_file?(selected_path, path),
+    do: EditorLlm.strong_related_file?(selected_path, path)
 
-  defp llm_related_file_specs(_socket), do: []
+  defp related_file_reason(selected_path, path),
+    do: EditorLlm.related_file_reason(selected_path, path)
 
-  defp related_file_included?(socket, path) do
-    related_file_included?(
-      socket.assigns.selected_file,
-      path,
-      socket.assigns.related_file_context_overrides
-    )
-  end
-
-  defp related_file_included?(selected_path, path, overrides)
-       when is_binary(path) and is_map(overrides) do
-    case Map.fetch(overrides, path) do
-      {:ok, included?} -> included?
-      :error -> strong_related_file?(selected_path, path)
-    end
-  end
-
-  defp strong_related_file?(selected_path, path) do
-    related_file_reason(selected_path, path) in ["uses", "used by", "uses/used by", "test/template"]
-  end
-
-  defp related_file_reason(nil, _path), do: "related"
-
-  defp related_file_reason(selected_path, path)
-       when is_binary(selected_path) and is_binary(path) do
-    selected_analysis = file_analysis(selected_path)
-    related_analysis = file_analysis(path)
-
-    selected_uses_related? =
-      Enum.any?(related_analysis.defined_modules, &(&1 in selected_analysis.referenced_modules))
-
-    related_uses_selected? =
-      Enum.any?(selected_analysis.defined_modules, &(&1 in related_analysis.referenced_modules))
-
-    cond do
-      selected_uses_related? and related_uses_selected? -> "uses/used by"
-      selected_uses_related? -> "uses"
-      related_uses_selected? -> "used by"
-      convention_related_file?(selected_path, path) -> "test/template"
-      true -> "related"
-    end
-  end
-
-  defp file_analysis(path) do
-    with true <- File.regular?(path),
-         {:ok, content} <- File.read(path) do
-      Llm.ContextBuilder.analyze_file(content)
-    else
-      _ -> %{defined_modules: [], referenced_modules: [], public_functions: []}
-    end
-  end
-
-  defp convention_related_file?(selected_path, path) do
-    selected_basename = Path.basename(selected_path, Path.extname(selected_path))
-    related_basename = Path.basename(path, Path.extname(path))
-
-    related_basename in [
-      selected_basename,
-      "#{selected_basename}_test"
-    ] or String.ends_with?(path, "/#{selected_basename}_test.exs")
-  end
-
-  defp related_file_functions(path) do
-    path
-    |> Llm.ContextBuilder.extract_function()
-    |> Enum.map(fn function ->
-      %{
-        name: Map.get(function, :name, "[unknown]"),
-        kind: Map.get(function, :kind, "def"),
-        spec: Map.get(function, :spec),
-        head: Map.get(function, :head, "[unknown]"),
-        start_line: Map.get(function, :start_line, 1),
-        end_line: Map.get(function, :end_line, 1)
-      }
-    end)
-    |> Enum.reject(&(&1.name == "[unknown]"))
-    |> Enum.uniq_by(&{&1.name, &1.start_line, &1.end_line})
-    |> Enum.take(8)
-  end
-
-  defp related_file_public_contracts(path) do
-    path
-    |> related_file_functions()
-    |> Enum.filter(&public_related_function?/1)
-    |> Enum.map(fn function ->
-      %{
-        name: function.name,
-        spec: function.spec,
-        head: function.head,
-        start_line: function.start_line,
-        end_line: function.end_line
-      }
-    end)
-  end
-
-  defp public_related_function?(%{kind: kind}), do: kind in ["def", "defmacro", "defdelegate"]
-
-  defp matching_file_paths(search_root, pattern) do
-    case System.cmd("rg", ["-l", "--fixed-strings", pattern, search_root], stderr_to_stdout: true) do
-      {output, 0} ->
-        output
-        |> String.split("\n", trim: true)
-        |> Enum.map(&Path.expand/1)
-        |> Enum.filter(&File.regular?/1)
-        |> Enum.take(12)
-
-      {_output, _status} ->
-        []
-    end
-  end
-
-  defp related_search_root(cwd, selected_path) do
-    umbrella_root_for_path(cwd) ||
-      umbrella_root_for_path(selected_path) ||
-      Path.expand(cwd)
-  end
-
-  defp umbrella_root_for_path(path) do
-    expanded_path = Path.expand(path)
-    parent_path = Path.dirname(expanded_path)
-
-    cond do
-      parent_path == expanded_path ->
-        nil
-
-      Path.basename(parent_path) == "apps" and
-          File.exists?(Path.join(Path.dirname(parent_path), "mix.exs")) ->
-        Path.dirname(parent_path)
-
-      true ->
-        umbrella_root_for_path(parent_path)
-    end
-  end
-
-  defp build_llm_request(cwd, nil, _file_content, question) do
-    messages = Llm.Prompts.editor_folder_question(cwd, question)
-    prompt_stats = Llm.Prompts.stats(messages)
-
-    llm_context = %{
-      "mode" => "folder",
-      "path" => cwd,
-      "question" => question,
-      "prompt_stats" => prompt_stats
-    }
-
-    {messages, llm_context}
-  end
-
-  defp build_llm_request(_cwd, selected_file, file_content, question) do
-    messages = Llm.Prompts.editor_file_question(selected_file, file_content, question)
-    prompt_stats = Llm.Prompts.stats(messages)
-
-    llm_context = %{
-      "mode" => "file",
-      "path" => selected_file,
-      "question" => question,
-      "prompt_stats" => prompt_stats
-    }
-
-    {messages, llm_context}
-  end
-
-  defp llm_target_label(cwd, nil), do: "Folder: #{cwd}"
-  defp llm_target_label(_cwd, selected_file), do: "File: #{selected_file}"
-
-  defp llm_prompt_stats_label(%{"prompt_stats" => stats} = context) when is_map(stats) do
-    estimated_tokens = map_value(stats, :estimated_tokens, 0)
-    message_count = map_value(stats, :message_count, 0)
-
-    parts =
-      [
-        "~#{estimated_tokens} #{pluralize(estimated_tokens, "token")}",
-        "#{message_count} #{pluralize(message_count, "message")}"
-      ] ++ file_count_stats_parts(context)
-
-    "Prompt: " <> Enum.join(parts, " | ")
-  end
-
-  defp llm_prompt_stats_label(_context), do: nil
-
-  defp file_count_stats_parts(context) do
-    case Map.get(context, "file_count") do
-      count when is_integer(count) ->
-        ["#{count} #{pluralize(count, "file")}"]
-
-      _ ->
-        []
-    end
-  end
-
-  defp map_value(map, key, default) do
-    Map.get(map, key) || Map.get(map, Atom.to_string(key)) || default
-  end
-
-  defp pluralize(1, word), do: word
-  defp pluralize(_count, word), do: word <> "s"
+  defp related_file_functions(selected_path, path),
+    do: EditorLlm.related_file_functions(selected_path, path)
 
   defp padding_left(depth), do: 8 + depth * @indent_px
 
@@ -2138,29 +1594,23 @@ defmodule EditorWeb.EditorLive do
         {:noreply, assign(socket, :error_message, "No file selected.")}
 
       path ->
-        case File.write(path, content) do
-          :ok ->
-            case format_file(path) do
-              {:ok, formatted_content} ->
-                {:noreply,
-                 socket
-                 |> assign(:file_content, formatted_content)
-                 |> assign(:saved_content, formatted_content)
-                 |> assign(:dirty?, false)
-                 |> assign(:save_message, "Saved and formatted.")
-                 |> assign(:error_message, nil)
-                 |> assign(:editor_form, to_form(%{"content" => formatted_content}, as: :editor))}
+        with {:ok, path} <- ensure_within_workspace(path, socket.assigns.workspace_root),
+             :ok <- File.write(path, content) do
+          case format_file(path) do
+            {:ok, formatted_content} ->
+              EditorState.cache_file(path, formatted_content)
 
-              {:error, message} ->
-                {:noreply,
-                 socket
-                 |> assign(:file_content, content)
-                 |> assign(:saved_content, content)
-                 |> assign(:dirty?, false)
-                 |> assign(:save_message, "Saved.")
-                 |> assign(:error_message, message)
-                 |> assign(:editor_form, to_form(%{"content" => content}, as: :editor))}
-            end
+              {:noreply,
+               EditorState.apply_save(socket, formatted_content, "Saved and formatted.", nil)}
+
+            {:error, message} ->
+              EditorState.cache_file(path, content)
+
+              {:noreply, EditorState.apply_save(socket, content, "Saved.", message)}
+          end
+        else
+          {:error, message} when is_binary(message) ->
+            {:noreply, assign(socket, :error_message, message)}
 
           {:error, reason} ->
             {:noreply,

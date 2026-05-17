@@ -529,7 +529,10 @@ defmodule Llm.ContextBuilder do
   end
 
   defp function_name_from_head(line) do
-    case Regex.run(~r/^\s{2}(?:def|defp|defmacro|defmacrop|defdelegate)\s+([a-zA-Z_][\w!?]*)/, line) do
+    case Regex.run(
+           ~r/^\s{2}(?:def|defp|defmacro|defmacrop|defdelegate)\s+([a-zA-Z_][\w!?]*)/,
+           line
+         ) do
       [_match, name] -> name
       _ -> "[unknown]"
     end

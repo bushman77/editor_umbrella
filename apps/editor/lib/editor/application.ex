@@ -10,7 +10,8 @@ defmodule Editor.Application do
     children = [
       Editor.Repo,
       {DNSCluster, query: Application.get_env(:editor, :dns_cluster_query) || :ignore},
-      {Phoenix.PubSub, name: Editor.PubSub}
+      {Phoenix.PubSub, name: Editor.PubSub},
+      Editor.OpenFileCache
       # Start a worker by calling: Editor.Worker.start_link(arg)
       # {Editor.Worker, arg}
     ]

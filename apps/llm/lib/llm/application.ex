@@ -14,7 +14,15 @@ defmodule Llm.Application do
     [
       {Llm.Conversation, []},
       {Llm.Codex, []}
-    ] ++ llama_server_child_specs()
+    ] ++ opencode_acp_child_specs() ++ llama_server_child_specs()
+  end
+
+  defp opencode_acp_child_specs do
+    if Application.get_env(:llm, :opencode_acp_enabled, true) do
+      [{Llm.OpenCodeACP, []}]
+    else
+      []
+    end
   end
 
   defp llama_server_child_specs do

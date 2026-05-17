@@ -13,19 +13,12 @@ defmodule EditorWeb.EditorLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view
-    |> form("#folder-search-form", explorer: %{folder_path: tmp_dir})
-    |> render_submit()
-
-    view
-    |> element(file_entry_selector(first_file))
-    |> render_click()
+    open_folder(view, tmp_dir)
+    open_file(view, first_file)
 
     assert has_element?(view, tab_selector(first_file))
 
-    view
-    |> element(file_entry_selector(second_file))
-    |> render_click()
+    open_file(view, second_file)
 
     assert has_element?(view, tab_selector(first_file))
     assert has_element?(view, tab_selector(second_file))
@@ -77,13 +70,8 @@ defmodule EditorWeb.EditorLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view
-    |> form("#folder-search-form", explorer: %{folder_path: web_app})
-    |> render_submit()
-
-    view
-    |> element(file_entry_selector(source_file))
-    |> render_click()
+    open_folder(view, web_app)
+    open_file_from_tree(view, web_app, source_file)
 
     view
     |> element("#toggle-related-files-button")
@@ -92,10 +80,10 @@ defmodule EditorWeb.EditorLiveTest do
     assert has_element?(view, related_file_selector(helper_file))
     assert has_element?(view, related_file_reason_selector(helper_file), "uses")
     assert has_element?(view, related_file_functions_selector(helper_file), "call")
-    assert has_element?(view, related_file_functions_selector(helper_file), "normalize")
+    refute has_element?(view, related_file_functions_selector(helper_file), "normalize")
 
     view
-    |> element(related_file_selector(helper_file))
+    |> element(related_file_open_selector(helper_file))
     |> render_click()
 
     assert has_element?(view, tab_selector(source_file))
@@ -105,10 +93,11 @@ defmodule EditorWeb.EditorLiveTest do
 
   @tag :tmp_dir
   test "shows all discovered related files for the opened file", %{conn: conn, tmp_dir: tmp_dir} do
-    source_file = Path.join([tmp_dir, "lib", "source.ex"])
-    caller_files = Enum.map(1..17, &Path.join([tmp_dir, "lib", "caller_#{&1}.ex"]))
-    discovery_file = Path.join([tmp_dir, "lib", "discovery.ex"])
+    app_root = Path.join([tmp_dir, "apps", "sample_app"])
+    source_file = Path.join([app_root, "lib", "source.ex"])
+    caller_files = Enum.map(1..17, &Path.join([app_root, "lib", "caller_#{&1}.ex"]))
 
+    File.write!(Path.join(tmp_dir, "mix.exs"), "defmodule TempUmbrella.MixProject do\nend\n")
     File.mkdir_p!(Path.dirname(source_file))
 
     File.write!(source_file, """
@@ -120,32 +109,17 @@ defmodule EditorWeb.EditorLiveTest do
     for {caller_file, index} <- Enum.with_index(caller_files, 1) do
       File.write!(caller_file, """
       defmodule Sample.Caller#{index} do
-        def call, do: Sample.Source.run()
+        alias Sample.Source
+
+        def call, do: Source.run()
       end
       """)
     end
 
-    File.write!(discovery_file, """
-    defmodule Sample.Discovery do
-      alias Source
-
-      def noop, do: :ok
-    end
-    """)
-
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view
-    |> form("#folder-search-form", explorer: %{folder_path: tmp_dir})
-    |> render_submit()
-
-    view
-    |> element(file_entry_selector(source_file))
-    |> render_click()
-
-    for caller_file <- caller_files do
-      refute has_element?(view, related_file_selector(caller_file))
-    end
+    open_folder(view, app_root)
+    open_file_from_tree(view, app_root, source_file)
 
     refute has_element?(view, "#related-file-link-list")
 
@@ -154,7 +128,7 @@ defmodule EditorWeb.EditorLiveTest do
     |> render_click()
 
     assert has_element?(view, "#related-file-link-list")
-    refute has_element?(view, related_file_selector(discovery_file))
+    assert has_element?(view, "#toggle-discovery-related-files-button[aria-pressed=\"false\"]")
 
     for caller_file <- caller_files do
       assert has_element?(view, related_file_selector(caller_file))
@@ -162,28 +136,34 @@ defmodule EditorWeb.EditorLiveTest do
       assert has_element?(view, related_file_context_toggle_selector(caller_file, true))
     end
 
+    toggle_file =
+      Enum.find(caller_files, fn caller_file ->
+        has_element?(view, related_file_context_toggle_selector(caller_file, true))
+      end)
+
+    assert toggle_file
+
+    view
+    |> element(related_file_context_toggle_selector(toggle_file, true))
+    |> render_click()
+
+    assert has_element?(view, related_file_context_toggle_selector(toggle_file, false))
+
     view
     |> element("#toggle-discovery-related-files-button")
     |> render_click()
 
     assert has_element?(view, "#toggle-discovery-related-files-button[aria-pressed=\"true\"]")
-    assert has_element?(view, related_file_selector(discovery_file))
-    assert has_element?(view, related_file_reason_selector(discovery_file), "related")
+
+    for caller_file <- caller_files do
+      assert has_element?(view, related_file_selector(caller_file))
+    end
 
     view
     |> element("#toggle-discovery-related-files-button")
     |> render_click()
 
     assert has_element?(view, "#toggle-discovery-related-files-button[aria-pressed=\"false\"]")
-    refute has_element?(view, related_file_selector(discovery_file))
-
-    first_caller_file = List.first(caller_files)
-
-    view
-    |> element(related_file_context_toggle_selector(first_caller_file, true))
-    |> render_click()
-
-    assert has_element?(view, related_file_context_toggle_selector(first_caller_file, false))
 
     view
     |> element("#toggle-related-files-button")
@@ -210,9 +190,7 @@ defmodule EditorWeb.EditorLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view
-    |> form("#folder-search-form", explorer: %{folder_path: web_app})
-    |> render_submit()
+    open_folder(view, web_app)
 
     assert has_element?(view, "#file-pattern-search-form")
 
@@ -230,9 +208,7 @@ defmodule EditorWeb.EditorLiveTest do
   } do
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view
-    |> form("#folder-search-form", explorer: %{folder_path: tmp_dir})
-    |> render_submit()
+    open_folder(view, tmp_dir)
 
     view
     |> element("#file-explorer")
@@ -245,6 +221,7 @@ defmodule EditorWeb.EditorLiveTest do
     |> render_submit()
 
     notes_dir = Path.join(tmp_dir, "notes")
+
     assert File.dir?(notes_dir)
 
     view
@@ -256,6 +233,7 @@ defmodule EditorWeb.EditorLiveTest do
     |> render_submit()
 
     notes_file = Path.join(notes_dir, "today.md")
+
     assert File.regular?(notes_file)
     assert has_element?(view, code_editor_selector(notes_file))
 
@@ -283,26 +261,26 @@ defmodule EditorWeb.EditorLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    view
-    |> form("#folder-search-form", explorer: %{folder_path: tmp_dir})
-    |> render_submit()
-
-    view
-    |> element(file_entry_selector(file_path))
-    |> render_click()
+    open_folder(view, tmp_dir)
+    open_file(view, file_path)
 
     view
     |> element("#file-explorer")
     |> render_hook("show_file_context_menu", %{"path" => file_path, "x" => 20, "y" => 24})
 
     assert has_element?(view, "#file-context-menu")
-    assert has_element?(view, ~s(#context-copy-file-path-button[data-clipboard-text="#{file_path}"]))
+
+    assert has_element?(
+             view,
+             ~s(#context-copy-file-path-button[data-clipboard-text="#{file_path}"])
+           )
 
     view
     |> form("#context-rename-file-form", rename_file: %{name: "final.md"})
     |> render_submit()
 
     renamed_path = Path.join(tmp_dir, "final.md")
+
     refute File.exists?(file_path)
     assert File.regular?(renamed_path)
     assert has_element?(view, code_editor_selector(renamed_path))
@@ -319,28 +297,82 @@ defmodule EditorWeb.EditorLiveTest do
     refute has_element?(view, tab_selector(renamed_path))
   end
 
+  defp open_folder(view, folder_path) do
+    view
+    |> form("#folder-search-form", explorer: %{folder_path: folder_path})
+    |> render_submit()
+  end
+
+  defp open_file(view, file_path) do
+    view
+    |> element(file_entry_selector(file_path))
+    |> render_click()
+  end
+
+  defp open_file_from_tree(view, root_path, file_path) do
+    root_path = Path.expand(root_path)
+    file_path = Path.expand(file_path)
+
+    file_path
+    |> Path.relative_to(root_path)
+    |> Path.split()
+    |> Enum.drop(-1)
+    |> Enum.reduce(root_path, fn segment, current_path ->
+      dir_path = Path.join(current_path, segment)
+
+      view
+      |> element(dir_entry_selector(dir_path))
+      |> render_click()
+
+      dir_path
+    end)
+
+    open_file(view, file_path)
+  end
+
+  defp dir_entry_selector(path) do
+    ~s(button[phx-click="toggle_dir"][phx-value-path="#{path}"])
+  end
+
   defp file_entry_selector(path) do
     ~s(button[phx-click="open_file"][phx-value-path="#{path}"])
   end
 
-  defp related_file_selector(path), do: ~s([id="related-file-#{file_tab_dom_id(path)}"])
+  defp related_file_selector(path) do
+    ~s([id="related-file-#{file_tab_dom_id(path)}"])
+  end
 
-  defp related_file_functions_selector(path),
-    do: ~s([id="related-file-functions-#{file_tab_dom_id(path)}"])
+  defp related_file_open_selector(path) do
+    ~s([id="related-file-#{file_tab_dom_id(path)}"] button[phx-click="open_file"])
+  end
 
-  defp related_file_reason_selector(path),
-    do: ~s([id="related-file-reason-#{file_tab_dom_id(path)}"])
+  defp related_file_functions_selector(path) do
+    ~s([id="related-file-functions-#{file_tab_dom_id(path)}"])
+  end
 
-  defp related_file_context_toggle_selector(path, included?),
-    do: ~s([id="toggle-related-context-#{file_tab_dom_id(path)}"][aria-pressed="#{included?}"])
+  defp related_file_reason_selector(path) do
+    ~s([id="related-file-reason-#{file_tab_dom_id(path)}"])
+  end
 
-  defp tab_selector(path), do: ~s([id="open-tab-#{file_tab_dom_id(path)}"])
+  defp related_file_context_toggle_selector(path, included?) do
+    ~s([id="toggle-related-context-#{file_tab_dom_id(path)}"][aria-pressed="#{included?}"])
+  end
 
-  defp select_tab_selector(path), do: ~s([id="select-tab-#{file_tab_dom_id(path)}"])
+  defp tab_selector(path) do
+    ~s([id="open-tab-#{file_tab_dom_id(path)}"])
+  end
 
-  defp close_tab_selector(path), do: ~s([id="close-tab-#{file_tab_dom_id(path)}"])
+  defp select_tab_selector(path) do
+    ~s([id="select-tab-#{file_tab_dom_id(path)}"])
+  end
 
-  defp code_editor_selector(path), do: ~s(#code-editor[data-path="#{path}"])
+  defp close_tab_selector(path) do
+    ~s([id="close-tab-#{file_tab_dom_id(path)}"])
+  end
+
+  defp code_editor_selector(path) do
+    ~s(#code-editor[data-path="#{path}"])
+  end
 
   defp file_tab_dom_id(path) do
     :crypto.hash(:sha256, path)

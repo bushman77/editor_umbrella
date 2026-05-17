@@ -90,66 +90,6 @@ defmodule EditorWeb.Layouts do
     """
   end
 
-  defp app_header(assigns) do
-    ~H"""
-    <header class="border-b border-base-300 bg-base-100/90 backdrop-blur">
-      <div class="mx-auto flex w-full max-w-7xl items-center justify-between gap-4 px-4 py-3 sm:px-6 lg:px-8">
-        <.brand_link />
-
-        <div class="flex items-center gap-2 sm:gap-3">
-          <.header_link href="https://phoenixframework.org/">Website</.header_link>
-          <.header_link href="https://github.com/phoenixframework/phoenix">GitHub</.header_link>
-          <.theme_toggle />
-          <.header_cta href="https://hexdocs.pm/phoenix/overview.html">Get Started</.header_cta>
-        </div>
-      </div>
-    </header>
-    """
-  end
-
-  defp brand_link(assigns) do
-    ~H"""
-    <a href="/" class="flex items-center gap-3">
-      <img src={~p"/images/logo.svg"} width="36" alt="Editor logo" />
-      <div class="flex flex-col">
-        <span class="text-sm font-semibold tracking-tight">Editor</span>
-        <span class="text-xs text-base-content/60">
-          Phoenix v{Application.spec(:phoenix, :vsn)}
-        </span>
-      </div>
-    </a>
-    """
-  end
-
-  attr :href, :string, required: true
-  slot :inner_block, required: true
-
-  defp header_link(assigns) do
-    ~H"""
-    <a
-      href={@href}
-      class="rounded-lg px-3 py-2 text-sm font-medium text-base-content/70 transition hover:bg-base-200 hover:text-base-content"
-    >
-      {render_slot(@inner_block)}
-    </a>
-    """
-  end
-
-  attr :href, :string, required: true
-  slot :inner_block, required: true
-
-  defp header_cta(assigns) do
-    ~H"""
-    <a
-      href={@href}
-      class="inline-flex items-center rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-content transition hover:brightness-110"
-    >
-      {render_slot(@inner_block)}
-      <span aria-hidden="true" class="ml-2">&rarr;</span>
-    </a>
-    """
-  end
-
   attr :theme, :string, required: true
   attr :icon, :string, required: true
   attr :label, :string, required: true
