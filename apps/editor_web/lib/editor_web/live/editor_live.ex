@@ -57,6 +57,37 @@ defmodule EditorWeb.EditorLive do
   end
 
   @impl true
+  def handle_event("show_sidebar_mode", %{"mode" => "files"}, socket) do
+    {:noreply, assign(socket, :sidebar_mode, :files)}
+  end
+
+  def handle_event("show_sidebar_mode", %{"mode" => "conversations"}, socket) do
+    {:noreply, assign(socket, :sidebar_mode, :conversations)}
+  end
+
+  @impl true
+  def handle_event("select_llm_conversation", %{"id" => conversation_id}, socket) do
+    conversation =
+      socket.assigns.cwd
+      |> Llm.Conversation.list_for_project()
+      |> Enum.find(&(&1.id == conversation_id))
+
+    case conversation do
+      nil ->
+        {:noreply, socket}
+
+      conversation ->
+        {:noreply,
+         socket
+         |> assign(:llm_conversation_id, conversation.id)
+         |> assign(:llm_response, nil)
+         |> assign(:llm_context, nil)
+         |> assign(:llm_error, nil)
+         |> assign(:llm_pending_question, nil)}
+    end
+  end
+
+  @impl true
   def handle_event("open_path", %{"explorer" => %{"folder_path" => folder_path}}, socket) do
     path = normalize_path(folder_path, socket.assigns.cwd)
 
@@ -364,7 +395,43 @@ defmodule EditorWeb.EditorLive do
           class="flex h-screen w-[15%] shrink-0 flex-col border-r border-base-300 bg-base-200"
         >
           <div class="border-b border-base-300 p-2">
+            <div
+              id="sidebar-mode-toggle"
+              class="mb-2 grid grid-cols-2 gap-1 rounded-md bg-base-300/50 p-1 text-xs"
+            >
+              <button
+                id="show-files-sidebar-button"
+                type="button"
+                phx-click="show_sidebar_mode"
+                phx-value-mode="files"
+                aria-pressed={to_string(@sidebar_mode == :files)}
+                class={[
+                  "rounded px-2 py-1 font-medium transition",
+                  @sidebar_mode == :files && "bg-base-100 text-base-content shadow-sm",
+                  @sidebar_mode != :files && "text-base-content/60 hover:bg-base-200"
+                ]}
+              >
+                Files
+              </button>
+
+              <button
+                id="show-conversations-sidebar-button"
+                type="button"
+                phx-click="show_sidebar_mode"
+                phx-value-mode="conversations"
+                aria-pressed={to_string(@sidebar_mode == :conversations)}
+                class={[
+                  "rounded px-2 py-1 font-medium transition",
+                  @sidebar_mode == :conversations && "bg-base-100 text-base-content shadow-sm",
+                  @sidebar_mode != :conversations && "text-base-content/60 hover:bg-base-200"
+                ]}
+              >
+                Conversations
+              </button>
+            </div>
+
             <.form
+              :if={@sidebar_mode == :files}
               for={@form}
               id="folder-search-form"
               phx-submit="open_path"
@@ -383,6 +450,7 @@ defmodule EditorWeb.EditorLive do
           </div>
 
           <div
+            :if={@sidebar_mode == :files}
             id="file-explorer"
             class="flex-1 overflow-y-auto p-2"
             phx-hook="FileExplorerContextMenu"
@@ -407,6 +475,45 @@ defmodule EditorWeb.EditorLive do
               <%= for entry <- @entries do %>
                 <.tree_node entry={entry} depth={0} selected_file={@selected_file} />
               <% end %>
+            </div>
+          </div>
+
+          <div
+            :if={@sidebar_mode == :conversations}
+            id="conversation-selector"
+            class="flex-1 overflow-y-auto p-2"
+          >
+            <div class="mb-2 rounded-md px-2 py-1 text-xs uppercase tracking-wide text-base-content/50">
+              Conversations
+            </div>
+
+            <div
+              :if={Llm.Conversation.list_for_project(@cwd) == []}
+              id="conversation-selector-empty"
+              class="rounded-md border border-base-300 bg-base-100 px-3 py-3 text-xs text-base-content/60"
+            >
+              No saved conversations for this folder yet.
+            </div>
+
+            <div class="space-y-1">
+              <button
+                :for={conversation <- Llm.Conversation.list_for_project(@cwd)}
+                id={"select-conversation-#{conversation_dom_id(conversation.id)}"}
+                type="button"
+                phx-click="select_llm_conversation"
+                phx-value-id={conversation.id}
+                class={[
+                  "w-full rounded-md px-2 py-2 text-left text-xs transition hover:bg-base-300",
+                  @llm_conversation_id == conversation.id && "bg-base-300 font-medium"
+                ]}
+              >
+                <div class="truncate text-base-content">
+                  {conversation_title(conversation)}
+                </div>
+                <div class="mt-1 truncate text-[0.7rem] text-base-content/50">
+                  {conversation_subtitle(conversation)}
+                </div>
+              </button>
             </div>
           </div>
         </aside>
@@ -1239,6 +1346,7 @@ defmodule EditorWeb.EditorLive do
     |> assign(:workspace_root, workspace_root)
     |> assign(:cwd, cwd)
     |> assign(:entries, load_entries(cwd, workspace_root))
+    |> assign(:sidebar_mode, :files)
     |> EditorState.assign_defaults()
     |> assign(:folder_context_menu, nil)
     |> assign(:file_context_menu, nil)
@@ -1649,4 +1757,41 @@ defmodule EditorWeb.EditorLive do
         {:error, "Saved, but mix format timed out."}
     end
   end
+
+  defp conversation_title(%{messages: [%{content: content} | _]}) when is_binary(content) do
+    content
+    |> String.trim()
+    |> case do
+      "" -> "Untitled conversation"
+      title -> title
+    end
+  end
+
+  defp conversation_title(_conversation), do: "Untitled conversation"
+
+  defp conversation_subtitle(conversation) do
+    message_count = length(Map.get(conversation, :messages, []))
+    current_file = Map.get(conversation, :current_file)
+
+    parts =
+      [
+        "#{message_count} #{pluralize(message_count, "message")}",
+        conversation_file_label(current_file)
+      ]
+      |> Enum.reject(&(&1 in [nil, ""]))
+
+    Enum.join(parts, " • ")
+  end
+
+  defp conversation_file_label(path) when is_binary(path), do: Path.basename(path)
+  defp conversation_file_label(_path), do: nil
+
+  defp conversation_dom_id(id) when is_binary(id) do
+    :crypto.hash(:sha256, id)
+    |> Base.url_encode64(padding: false)
+    |> binary_part(0, 12)
+  end
+
+  defp pluralize(1, singular), do: singular
+  defp pluralize(_count, singular), do: singular <> "s"
 end

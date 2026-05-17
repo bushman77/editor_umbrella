@@ -48,6 +48,12 @@ defmodule Llm.Conversation do
     GenServer.call(__MODULE__, {:get, conversation_id}, :infinity)
   end
 
+  @spec list_for_project(String.t(), pos_integer()) :: [snapshot()]
+  def list_for_project(project_id, limit \\ 50)
+      when is_binary(project_id) and is_integer(limit) and limit > 0 do
+    GenServer.call(__MODULE__, {:list_for_project, project_id, limit}, :infinity)
+  end
+
   @spec recent_messages(id(), pos_integer(), keyword()) :: [message()]
   def recent_messages(conversation_id, limit \\ @default_recent_limit, opts \\ [])
       when is_binary(conversation_id) and is_integer(limit) and limit > 0 and is_list(opts) do
@@ -99,6 +105,18 @@ defmodule Llm.Conversation do
 
   def handle_call({:get, conversation_id}, _from, state) do
     {:reply, lookup(conversation_id), state}
+  end
+
+  def handle_call({:list_for_project, project_id, limit}, _from, state) do
+    snapshots =
+      @table
+      |> :ets.tab2list()
+      |> Enum.map(fn {_id, snapshot} -> snapshot end)
+      |> Enum.filter(&(&1.project_id == project_id))
+      |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
+      |> Enum.take(limit)
+
+    {:reply, snapshots, state}
   end
 
   def handle_call({:recent_messages, conversation_id, limit, opts}, _from, state) do

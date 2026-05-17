@@ -72,6 +72,43 @@ defmodule LlmTest do
     assert Llm.LlamaServer.base_url() == "http://0.0.0.0:9999"
   end
 
+  test "conversation lists snapshots for a project newest first" do
+    ensure_conversation_started()
+
+    project_id = "project-list-test-#{System.unique_integer([:positive])}"
+    other_project_id = "project-list-other-#{System.unique_integer([:positive])}"
+
+    first_id = Llm.Conversation.new_id(project_id)
+    second_id = Llm.Conversation.new_id(project_id)
+    other_id = Llm.Conversation.new_id(other_project_id)
+
+    Llm.Conversation.record_turn(first_id, "Older question?", nil,
+      project_id: project_id,
+      current_file: "lib/older.ex"
+    )
+
+    Process.sleep(2)
+
+    Llm.Conversation.record_turn(second_id, "Newer question?", nil,
+      project_id: project_id,
+      current_file: "lib/newer.ex"
+    )
+
+    Llm.Conversation.record_turn(other_id, "Other project?", nil,
+      project_id: other_project_id,
+      current_file: "lib/other.ex"
+    )
+
+    assert Enum.map(Llm.Conversation.list_for_project(project_id), & &1.id) == [
+             second_id,
+             first_id
+           ]
+
+    assert Enum.map(Llm.Conversation.list_for_project(project_id, 1), & &1.id) == [
+             second_id
+           ]
+  end
+
   defp restore_llm_env(key, nil), do: Application.delete_env(:llm, key)
   defp restore_llm_env(key, value), do: Application.put_env(:llm, key, value)
 
@@ -368,13 +405,19 @@ defmodule LlmTest do
 
   test "conversation records user turn when assistant answer is nil" do
     ensure_conversation_started()
-    conversation_id = Llm.Conversation.new_id("project-c")
 
-    snapshot = Llm.Conversation.record_turn(conversation_id, "Question?", nil)
+    project_id = "project-nil-answer-#{System.unique_integer([:positive])}"
+    conversation_id = Llm.Conversation.new_id(project_id)
 
-    assert snapshot.messages == [
-             %{role: "user", content: "Question?"}
-           ]
+    Llm.Conversation.delete(conversation_id)
+
+    snapshot =
+      Llm.Conversation.record_turn(conversation_id, "Question?", nil,
+        project_id: project_id,
+        current_file: "lib/example.ex"
+      )
+
+    assert snapshot.messages == [%{role: "user", content: "Question?"}]
   end
 
   test "build_context includes recent conversation messages when provided" do

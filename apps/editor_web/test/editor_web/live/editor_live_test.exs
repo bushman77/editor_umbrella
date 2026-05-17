@@ -312,6 +312,44 @@ defmodule EditorWeb.EditorLiveTest do
     assert has_element?(view, "#llm-history-status", "History retained")
   end
 
+  @tag :tmp_dir
+  test "sidebar toggles between file explorer and conversation selector", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    conversation_id = Llm.Conversation.new_id(tmp_dir)
+
+    Llm.Conversation.record_turn(
+      conversation_id,
+      "How does this editor keep chat history?",
+      nil,
+      project_id: tmp_dir,
+      current_file: nil
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    open_folder(view, tmp_dir)
+
+    assert has_element?(view, "#file-explorer")
+    refute has_element?(view, "#conversation-selector")
+
+    view
+    |> element("#show-conversations-sidebar-button")
+    |> render_click()
+
+    refute has_element?(view, "#file-explorer")
+    assert has_element?(view, "#conversation-selector")
+    assert has_element?(view, "#conversation-selector", "How does this editor keep chat history?")
+
+    view
+    |> element("#show-files-sidebar-button")
+    |> render_click()
+
+    assert has_element?(view, "#file-explorer")
+    refute has_element?(view, "#conversation-selector")
+  end
+
   #########################################
   # PRIVATE FUNCTIONS
   #########################################
