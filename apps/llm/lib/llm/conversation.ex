@@ -83,6 +83,11 @@ defmodule Llm.Conversation do
   @impl true
   def init(_opts) do
     :ets.new(@table, [:named_table, :protected, read_concurrency: true])
+
+    for snapshot <- Llm.ConversationStore.all() do
+      :ets.insert(@table, {snapshot.id, snapshot})
+    end
+
     {:ok, %{}}
   end
 
@@ -151,6 +156,8 @@ defmodule Llm.Conversation do
 
   def handle_call({:delete, conversation_id}, _from, state) do
     :ets.delete(@table, conversation_id)
+    Llm.ConversationStore.delete(conversation_id)
+
     {:reply, :ok, state}
   end
 
@@ -219,6 +226,8 @@ defmodule Llm.Conversation do
 
   defp insert(snapshot) do
     :ets.insert(@table, {snapshot.id, snapshot})
+    Llm.ConversationStore.put(snapshot)
+    snapshot
   end
 
   defp normalize_summary(summary) when is_binary(summary) do

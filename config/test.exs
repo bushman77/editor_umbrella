@@ -20,6 +20,13 @@ config :editor_web, EditorWeb.Endpoint,
   secret_key_base: "fEy1tuS5AZDU8n0EePVOzV1NiXlZ+OXcl3V4XkDUv+HCxnXXLPp/YzpGfoF+isCX",
   server: false
 
+config :llm,
+  conversation_store_path:
+    Path.join(
+      System.tmp_dir!(),
+      "editor_umbrella_llm_conversations_test_#{System.unique_integer([:positive])}.dets"
+    )
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

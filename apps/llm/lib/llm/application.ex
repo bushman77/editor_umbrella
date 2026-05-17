@@ -12,6 +12,7 @@ defmodule Llm.Application do
   @spec child_specs() :: [Supervisor.child_spec()]
   def child_specs do
     [
+      {Llm.ConversationStore, []},
       {Llm.Conversation, []},
       {Llm.Codex, []}
     ] ++ opencode_acp_child_specs() ++ llama_server_child_specs()
