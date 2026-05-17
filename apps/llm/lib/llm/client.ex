@@ -1,11 +1,6 @@
 defmodule Llm.Client do
   @moduledoc false
 
-  @base_url "http://127.0.0.1:8000"
-  @request_options [
-    receive_timeout: :infinity,
-    connect_options: [timeout: 5_000]
-  ]
   @chat_max_tokens 8_192
 
   @type chat_message :: %{required(:role) => String.t(), required(:content) => String.t()}
@@ -27,14 +22,14 @@ defmodule Llm.Client do
     response =
       Req.post!(
         [
-          url: "#{@base_url}/v1/chat/completions",
+          url: "#{base_url()}/v1/chat/completions",
           json: %{
             model: "local-model",
             messages: messages,
             stream: false,
             max_tokens: max_tokens
           }
-        ] ++ @request_options
+        ] ++ request_options()
       )
 
     {:ok, response.body}
@@ -47,17 +42,30 @@ defmodule Llm.Client do
     response =
       Req.post!(
         [
-          url: "#{@base_url}/completion",
+          url: "#{base_url()}/completion",
           json: %{
             prompt: prompt,
             n_predict: 256
           }
-        ] ++ @request_options
+        ] ++ request_options()
       )
 
     {:ok, Map.get(response.body, "content")}
   rescue
     error -> {:error, error}
+  end
+
+  defp base_url do
+    Llm.LlamaServer.base_url()
+  end
+
+  defp request_options do
+    [
+      receive_timeout: Application.get_env(:llm, :client_receive_timeout, :infinity),
+      connect_options: [
+        timeout: Application.get_env(:llm, :client_connect_timeout_ms, 5_000)
+      ]
+    ]
   end
 
   defp response_content(body, _max_tokens) when is_binary(body) do

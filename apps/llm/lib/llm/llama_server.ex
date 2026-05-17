@@ -15,43 +15,21 @@ defmodule Llm.LlamaServer do
   use GenServer
   require Logger
 
-  # ---------------------------------------------------------------------------
-  # Model / llama.cpp paths
-  # ---------------------------------------------------------------------------
-
   @default_model_path "~/models/qwen2.5-coder-7b-instruct-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf"
-  @llama_dir "~/llama.cpp"
-  @llama_server_path "build/bin/llama-server"
-
-  # ---------------------------------------------------------------------------
-  # Server binding
-  # ---------------------------------------------------------------------------
-
-  @host "127.0.0.1"
-  @port 8000
-
-  # ---------------------------------------------------------------------------
-  # llama-server tuning
-  #
-  # High-context local defaults. These are intentionally large for slower,
-  # higher-quality editor answers over broad project context.
-  # ---------------------------------------------------------------------------
-
-  @flash_attention "on"
-  @gpu_layers "auto"
-  @parallel_slots 1
-  @context_size 32_768
-  @max_tokens 8_192
-  @batch_size 2_048
-  @micro_batch_size 512
-
-  # ---------------------------------------------------------------------------
-  # Startup / readiness timing
-  # ---------------------------------------------------------------------------
-
-  @startup_wait_ms 30_000
-  @poll_interval_ms 500
-  @tcp_connect_timeout_ms 1_000
+  @default_llama_dir "~/llama.cpp"
+  @default_llama_server_path "build/bin/llama-server"
+  @default_host "127.0.0.1"
+  @default_port 8000
+  @default_flash_attention "on"
+  @default_gpu_layers "auto"
+  @default_parallel_slots 1
+  @default_context_size 32_768
+  @default_max_tokens 8_192
+  @default_batch_size 2_048
+  @default_micro_batch_size 512
+  @default_startup_wait_ms 30_000
+  @default_poll_interval_ms 500
+  @default_tcp_connect_timeout_ms 1_000
 
   defstruct port: nil,
             started_by_app?: false,
@@ -90,7 +68,7 @@ defmodule Llm.LlamaServer do
 
   @spec running?() :: boolean()
   def running? do
-    case :gen_tcp.connect(tcp_host(), @port, [:binary, active: false], @tcp_connect_timeout_ms) do
+    case :gen_tcp.connect(tcp_host(), port(), [:binary, active: false], tcp_connect_timeout_ms()) do
       {:ok, socket} ->
         :gen_tcp.close(socket)
         true
@@ -101,7 +79,7 @@ defmodule Llm.LlamaServer do
   end
 
   @spec wait_until_ready(timeout()) :: :ok | {:error, :startup_timeout}
-  def wait_until_ready(timeout_ms \\ @startup_wait_ms) do
+  def wait_until_ready(timeout_ms \\ startup_wait_ms()) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
 
     do_wait_until_ready(deadline_ms)
@@ -201,23 +179,23 @@ defmodule Llm.LlamaServer do
       model_path(),
       "--jinja",
       "--host",
-      @host,
+      host(),
       "--port",
-      to_string(@port),
+      to_string(port()),
       "-fa",
-      @flash_attention,
+      flash_attention(),
       "-ngl",
-      @gpu_layers,
+      gpu_layers(),
       "-np",
-      to_string(@parallel_slots),
+      to_string(parallel_slots()),
       "-c",
-      to_string(@context_size),
+      to_string(context_size()),
       "-n",
-      to_string(@max_tokens),
+      to_string(max_tokens()),
       "-b",
-      to_string(@batch_size),
+      to_string(batch_size()),
       "-ub",
-      to_string(@micro_batch_size)
+      to_string(micro_batch_size())
     ]
   end
 
@@ -234,7 +212,7 @@ defmodule Llm.LlamaServer do
         {:error, :startup_timeout}
 
       true ->
-        Process.sleep(@poll_interval_ms)
+        Process.sleep(poll_interval_ms())
         do_wait_until_ready(deadline_ms)
     end
   end
@@ -250,20 +228,81 @@ defmodule Llm.LlamaServer do
     |> Path.expand()
   end
 
+  @spec base_url() :: String.t()
+  def base_url do
+    "http://#{host()}:#{port()}"
+  end
+
   defp llama_dir do
-    Path.expand(@llama_dir)
+    :llm
+    |> Application.get_env(:llama_dir, @default_llama_dir)
+    |> Path.expand()
   end
 
   defp executable_path do
-    Path.join(llama_dir(), @llama_server_path)
+    Path.join(llama_dir(), llama_server_path())
   end
 
   defp endpoint do
-    "#{@host}:#{@port}"
+    "#{host()}:#{port()}"
   end
 
   defp tcp_host do
-    String.to_charlist(@host)
+    host()
+    |> to_string()
+    |> String.to_charlist()
+  end
+
+  defp llama_server_path do
+    Application.get_env(:llm, :llama_server_path, @default_llama_server_path)
+  end
+
+  defp host do
+    Application.get_env(:llm, :host, @default_host)
+  end
+
+  defp port do
+    Application.get_env(:llm, :port, @default_port)
+  end
+
+  defp flash_attention do
+    Application.get_env(:llm, :flash_attention, @default_flash_attention)
+  end
+
+  defp gpu_layers do
+    Application.get_env(:llm, :gpu_layers, @default_gpu_layers)
+  end
+
+  defp parallel_slots do
+    Application.get_env(:llm, :parallel_slots, @default_parallel_slots)
+  end
+
+  defp context_size do
+    Application.get_env(:llm, :context_size, @default_context_size)
+  end
+
+  defp max_tokens do
+    Application.get_env(:llm, :max_tokens, @default_max_tokens)
+  end
+
+  defp batch_size do
+    Application.get_env(:llm, :batch_size, @default_batch_size)
+  end
+
+  defp micro_batch_size do
+    Application.get_env(:llm, :micro_batch_size, @default_micro_batch_size)
+  end
+
+  defp startup_wait_ms do
+    Application.get_env(:llm, :startup_wait_ms, @default_startup_wait_ms)
+  end
+
+  defp poll_interval_ms do
+    Application.get_env(:llm, :poll_interval_ms, @default_poll_interval_ms)
+  end
+
+  defp tcp_connect_timeout_ms do
+    Application.get_env(:llm, :tcp_connect_timeout_ms, @default_tcp_connect_timeout_ms)
   end
 
   defp log_server_output(data) do

@@ -57,6 +57,24 @@ defmodule LlmTest do
     assert Llm.LlamaServer.model_path() == Path.expand(configured_model)
   end
 
+  test "llama server base url comes from llm host and port config" do
+    original_host = Application.get_env(:llm, :host)
+    original_port = Application.get_env(:llm, :port)
+
+    on_exit(fn ->
+      restore_llm_env(:host, original_host)
+      restore_llm_env(:port, original_port)
+    end)
+
+    Application.put_env(:llm, :host, "0.0.0.0")
+    Application.put_env(:llm, :port, 9999)
+
+    assert Llm.LlamaServer.base_url() == "http://0.0.0.0:9999"
+  end
+
+  defp restore_llm_env(key, nil), do: Application.delete_env(:llm, key)
+  defp restore_llm_env(key, value), do: Application.put_env(:llm, key, value)
+
   test "folder prompts include project paths without file contents" do
     root_path = Path.join(System.tmp_dir!(), "llm-prompt-test-#{System.unique_integer()}")
     nested_path = Path.join([root_path, "lib", "sample.ex"])
