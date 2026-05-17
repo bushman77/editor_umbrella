@@ -2,7 +2,9 @@ defmodule EditorWeb.EditorLiveTest do
   use EditorWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
-
+  #########################################
+  # TESTS 
+  #########################################
   @tag :tmp_dir
   test "tracks opened files as switchable tabs", %{conn: conn, tmp_dir: tmp_dir} do
     first_file = Path.join(tmp_dir, "alpha.txt")
@@ -297,6 +299,22 @@ defmodule EditorWeb.EditorLiveTest do
     refute has_element?(view, tab_selector(renamed_path))
   end
 
+  @tag :tmp_dir
+  test "LLM modal shows retained history indicator", %{conn: conn, tmp_dir: tmp_dir} do
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    open_folder(view, tmp_dir)
+
+    view
+    |> element("#open-llm-button")
+    |> render_click()
+
+    assert has_element?(view, "#llm-history-status", "History retained")
+  end
+
+  #########################################
+  # PRIVATE FUNCTIONS
+  #########################################
   defp open_folder(view, folder_path) do
     view
     |> form("#folder-search-form", explorer: %{folder_path: folder_path})

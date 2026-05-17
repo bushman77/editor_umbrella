@@ -159,6 +159,19 @@ defmodule EditorWeb.EditorLlm do
   def target_label(cwd, nil), do: "Folder: #{cwd}"
   def target_label(_cwd, selected_file), do: "File: #{selected_file}"
 
+  @spec history_status_label(map()) :: String.t() | nil
+  def history_status_label(%{llm_conversation_id: conversation_id})
+      when is_binary(conversation_id) do
+    message_count = conversation_message_count(conversation_id)
+
+    if message_count > 0 do
+      "History retained • #{message_count} #{pluralize(message_count, "message")}"
+    else
+      "History retained"
+    end
+  end
+
+  def history_status_label(_assigns), do: nil
   @spec prompt_stats_label(term()) :: String.t() | nil
   def prompt_stats_label(%{"prompt_stats" => stats} = context) when is_map(stats) do
     estimated_tokens = map_value(stats, :estimated_tokens, 0)
@@ -667,6 +680,18 @@ defmodule EditorWeb.EditorLlm do
 
       _ ->
         []
+    end
+  end
+
+  defp conversation_message_count(conversation_id) do
+    case Process.whereis(Llm.Conversation) do
+      nil ->
+        0
+
+      _pid ->
+        conversation_id
+        |> Llm.Conversation.recent_messages()
+        |> length()
     end
   end
 

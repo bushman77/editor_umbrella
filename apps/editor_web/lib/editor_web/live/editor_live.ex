@@ -883,6 +883,13 @@ defmodule EditorWeb.EditorLive do
                   <div class="llm-crt-muted truncate text-xs">
                     {EditorLlm.target_label(@cwd, @selected_file)}
                   </div>
+                  <div
+                    :if={EditorLlm.history_status_label(assigns)}
+                    id="llm-history-status"
+                    class="llm-crt-muted truncate text-xs"
+                  >
+                    {EditorLlm.history_status_label(assigns)}
+                  </div>
                 </div>
 
                 <div class="flex items-center gap-2">
