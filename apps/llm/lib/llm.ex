@@ -80,6 +80,14 @@ defmodule Llm do
     OpenCodeACP.reset_session(cwd)
   end
 
+  @doc false
+  @spec agent_prompt_preview(String.t(), String.t(), context() | nil, String.t() | nil) ::
+          String.t()
+  def agent_prompt_preview(cwd, prompt, context \\ nil, buffer_context \\ nil)
+      when is_binary(cwd) and is_binary(prompt) do
+    build_agent_prompt(cwd, prompt, context, buffer_context)
+  end
+
   @spec build_context(String.t(), String.t() | nil, String.t(), keyword()) ::
           {:ok, context()} | {:error, term()}
   def build_context(root_path, selected_file, question, opts \\ [])
@@ -164,6 +172,11 @@ defmodule Llm do
     - If the user asks to review this file, review the current file generally by default.
     - For a general file review, look for correctness issues, risky runtime behavior, confusing structure, dead code, missing error handling, boundary problems, and maintainability concerns.
     - Lead with concrete findings. If no concrete issues are visible, say that clearly.
+    - Do not move from review guidance into implementation unless the user explicitly asks for code, a patch, or a replacement.
+    - Do not invent toy/example implementations for existing project functions.
+    - Do not propose replacement code for an existing function unless that exact function body is visible in the provided source context.
+    - If only summaries or partial snippets are visible, name the exact function/file to inspect next instead of writing code.
+    - When the user asks where to start, choose one concrete target function or boundary and explain why; do not start implementing.
     - If the provided file context is incomplete, say the review is limited to the provided context, then still review what is visible.
     - If the provided context contains only a path and no source code, say that the source content was not included.
     - Keep the answer practical and concise.

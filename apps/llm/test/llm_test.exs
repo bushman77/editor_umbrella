@@ -1126,4 +1126,31 @@ defmodule LlmTest do
       start_supervised!({Llm.Codex, []})
     end
   end
+
+  test "agent prompt prevents review guidance from becoming invented implementations" do
+    prompt =
+      Llm.agent_prompt_preview(
+        "/workspace/project",
+        "where do you suggest we start?",
+        nil,
+        nil
+      )
+
+    assert prompt =~ "Do not move from review guidance into implementation"
+    assert prompt =~ "Do not invent toy/example implementations for existing project functions"
+
+    assert prompt =~
+             "Do not propose replacement code for an existing function unless that exact function body is visible"
+
+    assert prompt =~
+             "If only summaries or partial snippets are visible, name the exact function/file to inspect next"
+
+    assert prompt =~
+             "When the user asks where to start, choose one concrete target function or boundary and explain why"
+
+    assert prompt =~
+             ~s(Do not output headings such as "Goal", "Constraints & Preferences", "Progress")
+
+    assert prompt =~ "unless the user explicitly asks for that format"
+  end
 end
