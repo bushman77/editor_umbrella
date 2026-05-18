@@ -18,7 +18,9 @@ config :editor, Editor.Repo,
 config :editor_web, EditorWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "fEy1tuS5AZDU8n0EePVOzV1NiXlZ+OXcl3V4XkDUv+HCxnXXLPp/YzpGfoF+isCX",
-  server: false
+  server: false,
+  code_reloader: false,
+  debug_errors: false
 
 config :llm,
   conversation_store_path:

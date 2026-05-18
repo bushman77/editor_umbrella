@@ -350,7 +350,8 @@ defmodule EditorWeb.EditorLive do
         {:noreply, EditorLlm.apply_updates(socket, socket_updates)}
 
       {:ok, prepared} ->
-        request_assigns = socket.assigns
+        # Keep async payload small; do not pass the full socket assigns map.
+        request_assigns = llm_request_assigns(socket.assigns)
         trimmed_question = String.trim(question || "")
 
         {:noreply,
@@ -1146,6 +1147,16 @@ defmodule EditorWeb.EditorLive do
     :crypto.hash(:sha256, code)
     |> Base.url_encode64(padding: false)
     |> binary_part(0, 12)
+  end
+
+  defp llm_request_assigns(assigns) do
+    Map.take(assigns, [
+      :cwd,
+      :selected_file,
+      :related_files,
+      :related_file_context_overrides,
+      :llm_conversation_id
+    ])
   end
 
   attr(:text, :string, required: true)
