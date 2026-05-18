@@ -80,7 +80,8 @@ defmodule EditorWeb.EditorLive do
         {:noreply,
          socket
          |> assign(:llm_conversation_id, conversation.id)
-         |> assign(:llm_response, nil)
+         |> assign(:llm_messages, Map.get(conversation, :messages, []))
+         |> assign(:llm_response, latest_assistant_message(conversation))
          |> assign(:llm_context, nil)
          |> assign(:llm_error, nil)
          |> assign(:llm_pending_question, nil)}
@@ -306,6 +307,7 @@ defmodule EditorWeb.EditorLive do
      |> reset_llm_conversation(cwd)
      |> assign(:llm_loading?, false)
      |> assign(:llm_response, nil)
+     |> assign(:llm_messages, [])
      |> assign(:llm_context, nil)
      |> assign(:llm_error, nil)
      |> assign(:llm_pending_question, nil)
@@ -1020,80 +1022,117 @@ defmodule EditorWeb.EditorLive do
                 </div>
               </div>
 
-              <div class="llm-crt-body flex-1 overflow-y-auto px-4 py-4">
-                <.form for={@llm_form} id="llm-form" phx-submit="ask_llm" class="space-y-3">
-                  <.input
-                    field={@llm_form[:question]}
-                    id="llm-question"
-                    type="text"
-                    placeholder="Ask about the current file or folder"
-                    class="llm-crt-input w-full rounded px-3 py-2 text-sm outline-none transition"
-                  />
+              <div class="llm-crt-body flex min-h-0 flex-1 flex-col">
+                <% modal_messages = EditorLlm.modal_messages(assigns) %>
 
-                  <div class="flex justify-end">
-                    <button
-                      id="submit-llm-button"
-                      type="submit"
-                      class="llm-crt-button rounded px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={@llm_loading?}
-                    >
-                      {if @llm_loading?, do: "Asking...", else: "Ask"}
-                    </button>
+                <div id="llm-conversation-pane" class="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                  <div
+                    :if={modal_messages == []}
+                    id="llm-conversation-empty"
+                    class="llm-crt-muted flex min-h-full items-end text-sm"
+                  >
+                    Ask about the current file or folder.
                   </div>
-                </.form>
 
-                <div
-                  :if={EditorLlm.prompt_stats_label(@llm_context)}
-                  id="llm-prompt-stats"
-                  class="llm-crt-muted mt-3 text-xs"
-                >
-                  {EditorLlm.prompt_stats_label(@llm_context)}
+                  <div
+                    :if={modal_messages != []}
+                    id="llm-message-list"
+                    class="flex min-h-full flex-col justify-end gap-4"
+                  >
+                    <div
+                      :for={message <- modal_messages}
+                      id={"llm-message-#{message.id}"}
+                      class={[
+                        "max-w-[92%] rounded px-3 py-2 text-sm leading-6",
+                        message.role == "user" && "llm-crt-user-message self-end",
+                        message.role != "user" && "llm-crt-assistant-message self-start",
+                        message.pending? && "opacity-75"
+                      ]}
+                    >
+                      <div class="llm-crt-muted mb-1 text-[0.68rem] uppercase">
+                        {if message.role == "user", do: "You", else: "LLM"}
+                      </div>
+
+                      <%= if message.role == "assistant" do %>
+                        <div class="llm-message-content space-y-4">
+                          <%= for segment <- EditorLlm.response_segments(message.content) do %>
+                            <%= case segment do %>
+                              <% {:text, text} -> %>
+                                <.markdown_text text={text} />
+                              <% {:code, language, code} -> %>
+                                <div class="llm-crt-code overflow-hidden rounded">
+                                  <div class="llm-crt-code-header flex items-center justify-between px-4 py-2">
+                                    <div class="llm-crt-muted text-xs uppercase">
+                                      {if language == "", do: "code", else: language}
+                                    </div>
+
+                                    <button
+                                      type="button"
+                                      phx-click={
+                                        JS.dispatch(
+                                          "editor:copy",
+                                          to: "#llm-code-#{code_dom_id("#{message.id}:#{code}")}"
+                                        )
+                                      }
+                                      class="llm-crt-button rounded px-2 py-1 text-xs transition"
+                                    >
+                                      Copy
+                                    </button>
+                                  </div>
+
+                                  <pre
+                                    id={"llm-code-#{code_dom_id("#{message.id}:#{code}")}"}
+                                    phx-hook="CopyCodeBlock"
+                                    data-code={code}
+                                    class="overflow-x-auto px-4 py-4 text-sm leading-6"
+                                  ><code>{code}</code></pre>
+                                </div>
+                            <% end %>
+                          <% end %>
+                        </div>
+                      <% else %>
+                        <p class="whitespace-pre-wrap">{message.content}</p>
+                      <% end %>
+                    </div>
+                  </div>
                 </div>
 
-                <%= if @llm_error do %>
+                <div class="llm-crt-composer shrink-0 px-4 py-3">
                   <div
-                    id="llm-error"
-                    class="llm-crt-error mt-4 rounded px-3 py-3 text-sm"
+                    :if={EditorLlm.prompt_stats_label(@llm_context)}
+                    id="llm-prompt-stats"
+                    class="llm-crt-muted mb-2 text-xs"
                   >
-                    {@llm_error}
+                    {EditorLlm.prompt_stats_label(@llm_context)}
                   </div>
-                <% end %>
 
-                <%= if @llm_response do %>
-                  <div id="llm-response" class="mt-4 space-y-4">
-                    <%= for segment <- EditorLlm.response_segments(@llm_response) do %>
-                      <%= case segment do %>
-                        <% {:text, text} -> %>
-                          <.markdown_text text={text} />
-                        <% {:code, language, code} -> %>
-                          <div class="llm-crt-code overflow-hidden rounded">
-                            <div class="llm-crt-code-header flex items-center justify-between px-4 py-2">
-                              <div class="llm-crt-muted text-xs uppercase">
-                                {if language == "", do: "code", else: language}
-                              </div>
+                  <%= if @llm_error do %>
+                    <div id="llm-error" class="llm-crt-error mb-3 rounded px-3 py-3 text-sm">
+                      {@llm_error}
+                    </div>
+                  <% end %>
 
-                              <button
-                                type="button"
-                                phx-click={
-                                  JS.dispatch("editor:copy", to: "#llm-code-#{code_dom_id(code)}")
-                                }
-                                class="llm-crt-button rounded px-2 py-1 text-xs transition"
-                              >
-                                Copy
-                              </button>
-                            </div>
+                  <.form for={@llm_form} id="llm-form" phx-submit="ask_llm" class="space-y-3">
+                    <.input
+                      field={@llm_form[:question]}
+                      id="llm-question"
+                      type="text"
+                      placeholder="Ask about the current file or folder"
+                      class="llm-crt-input w-full rounded px-3 py-2 text-sm outline-none transition"
+                    />
 
-                            <pre
-                              id={"llm-code-#{code_dom_id(code)}"}
-                              phx-hook="CopyCodeBlock"
-                              data-code={code}
-                              class="overflow-x-auto px-4 py-4 text-sm leading-6"
-                            ><code>{code}</code></pre>
-                          </div>
-                      <% end %>
-                    <% end %>
-                  </div>
-                <% end %>
+                    <div class="flex justify-end">
+                      <button
+                        id="submit-llm-button"
+                        type="submit"
+                        class="llm-crt-button rounded px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={@llm_loading?}
+                      >
+                        {if @llm_loading?, do: "Asking...", else: "Ask"}
+                      </button>
+                    </div>
+                  </.form>
+                </div>
               </div>
             </div>
           </div>
@@ -1405,6 +1444,7 @@ defmodule EditorWeb.EditorLive do
     |> assign(:llm_modal_open?, false)
     |> assign(:llm_loading?, false)
     |> assign(:llm_response, nil)
+    |> assign(:llm_messages, [])
     |> assign(:llm_context, nil)
     |> assign(:llm_error, nil)
     |> assign(:llm_pending_question, nil)
@@ -1768,6 +1808,18 @@ defmodule EditorWeb.EditorLive do
   end
 
   defp conversation_title(_conversation), do: "Untitled conversation"
+
+  defp latest_assistant_message(%{messages: messages}) when is_list(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find(fn message -> Map.get(message, :role) == "assistant" end)
+    |> case do
+      %{content: content} when is_binary(content) -> content
+      _ -> nil
+    end
+  end
+
+  defp latest_assistant_message(_conversation), do: nil
 
   defp conversation_subtitle(conversation) do
     message_count = length(Map.get(conversation, :messages, []))

@@ -350,6 +350,42 @@ defmodule EditorWeb.EditorLiveTest do
     refute has_element?(view, "#conversation-selector")
   end
 
+  @tag :tmp_dir
+  test "selected conversation renders the full transcript in the LLM modal", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    conversation_id = Llm.Conversation.new_id(tmp_dir)
+
+    Llm.Conversation.record_turn(
+      conversation_id,
+      "Earlier question marker?",
+      "Earlier answer marker.",
+      project_id: tmp_dir,
+      current_file: nil,
+      store_assistant?: true
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    open_folder(view, tmp_dir)
+
+    view
+    |> element("#show-conversations-sidebar-button")
+    |> render_click()
+
+    view
+    |> element("button[phx-value-id='#{conversation_id}']")
+    |> render_click()
+
+    view
+    |> element("#open-llm-button")
+    |> render_click()
+
+    assert has_element?(view, "#llm-message-list", "Earlier question marker?")
+    assert has_element?(view, "#llm-message-list", "Earlier answer marker.")
+  end
+
   #########################################
   # PRIVATE FUNCTIONS
   #########################################

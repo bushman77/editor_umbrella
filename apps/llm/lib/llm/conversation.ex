@@ -32,8 +32,8 @@ defmodule Llm.Conversation do
 
   @spec new_id(String.t() | nil) :: id()
   def new_id(project_id \\ nil) do
-    unique = System.unique_integer([:positive, :monotonic])
     prefix = project_id |> to_string() |> hash_id()
+    unique = 12 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
 
     "conversation:#{prefix}:#{unique}"
   end
@@ -113,6 +113,7 @@ defmodule Llm.Conversation do
       |> :ets.tab2list()
       |> Enum.map(fn {_id, snapshot} -> snapshot end)
       |> Enum.filter(&(&1.project_id == project_id))
+      |> Enum.filter(&conversation_visible?/1)
       |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
       |> Enum.take(limit)
 
@@ -266,4 +267,14 @@ defmodule Llm.Conversation do
     |> Base.encode16(case: :lower)
     |> binary_part(0, 12)
   end
+
+  defp conversation_visible?(%{messages: messages}) when is_list(messages) and messages != [] do
+    true
+  end
+
+  defp conversation_visible?(%{summary: summary}) when is_binary(summary) do
+    String.trim(summary) != ""
+  end
+
+  defp conversation_visible?(_snapshot), do: false
 end

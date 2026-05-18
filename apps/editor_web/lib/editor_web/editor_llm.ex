@@ -7,6 +7,12 @@ defmodule EditorWeb.EditorLlm do
   @llm_open_file_total_max_chars 48_000
 
   @type response_segment :: {:text, String.t()} | {:code, String.t(), String.t()}
+  @type modal_message :: %{
+          id: String.t(),
+          role: String.t(),
+          content: String.t(),
+          pending?: boolean()
+        }
 
   @type related_file_function :: %{
           name: String.t(),
@@ -31,6 +37,7 @@ defmodule EditorWeb.EditorLlm do
     |> assign(:llm_modal_open?, false)
     |> assign(:llm_loading?, false)
     |> assign(:llm_response, nil)
+    |> assign(:llm_messages, [])
     |> assign(:llm_context, nil)
     |> assign(:llm_error, nil)
     |> assign(:llm_conversation_id, new_conversation_id(cwd))
@@ -42,6 +49,7 @@ defmodule EditorWeb.EditorLlm do
   def reset_conversation(socket, cwd) do
     socket
     |> assign(:llm_conversation_id, new_conversation_id(cwd))
+    |> assign(:llm_messages, [])
     |> assign(:llm_pending_question, nil)
   end
 
@@ -119,20 +127,31 @@ defmodule EditorWeb.EditorLlm do
   def handle_success(socket, response, llm_context) do
     pending_question = socket.assigns.llm_pending_question || ""
 
-    if pending_question != "" do
-      Llm.Conversation.record_turn(
-        socket.assigns.llm_conversation_id,
-        pending_question,
-        response,
-        conversation_attrs(socket.assigns.cwd, socket.assigns.selected_file)
-      )
-    end
+    snapshot =
+      if pending_question != "" do
+        Llm.Conversation.record_turn(
+          socket.assigns.llm_conversation_id,
+          pending_question,
+          response,
+          socket.assigns.cwd
+          |> conversation_attrs(socket.assigns.selected_file)
+          |> Map.put(:store_assistant?, true)
+        )
+      end
+
+    messages =
+      case snapshot do
+        %{messages: messages} when is_list(messages) -> messages
+        _ -> Map.get(socket.assigns, :llm_messages, [])
+      end
 
     socket
     |> assign(:llm_loading?, false)
     |> assign(:llm_response, response)
+    |> assign(:llm_messages, messages)
     |> assign(:llm_context, llm_context)
     |> assign(:llm_pending_question, nil)
+    |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
     |> assign(:llm_error, nil)
   end
 
@@ -172,6 +191,14 @@ defmodule EditorWeb.EditorLlm do
   end
 
   def history_status_label(_assigns), do: nil
+
+  @spec modal_messages(map()) :: [modal_message()]
+  def modal_messages(assigns) when is_map(assigns) do
+    assigns
+    |> assigned_modal_messages()
+    |> maybe_append_pending_message(assigns)
+  end
+
   @spec prompt_stats_label(term()) :: String.t() | nil
   def prompt_stats_label(%{"prompt_stats" => stats} = context) when is_map(stats) do
     estimated_tokens = map_value(stats, :estimated_tokens, 0)
@@ -199,6 +226,8 @@ defmodule EditorWeb.EditorLlm do
       {:code, _language, code} -> String.trim(code) == ""
     end)
   end
+
+  def response_segments(_response), do: []
 
   @spec related_files(map()) :: [String.t()]
   def related_files(%{
@@ -629,6 +658,83 @@ defmodule EditorWeb.EditorLlm do
   defp resolve_called_module(_other, _alias_map), do: nil
 
   defp public_related_function?(%{kind: kind}), do: kind in ["def", "defmacro", "defdelegate"]
+
+  defp assigned_modal_messages(%{llm_messages: messages}) when is_list(messages) do
+    messages
+    |> Enum.with_index()
+    |> Enum.map(fn {message, index} ->
+      %{
+        id: message_dom_id(message, index),
+        role: Map.get(message, :role, "user"),
+        content: Map.get(message, :content, ""),
+        pending?: false
+      }
+    end)
+  end
+
+  defp assigned_modal_messages(assigns), do: stored_modal_messages(assigns)
+
+  defp stored_modal_messages(%{llm_conversation_id: conversation_id})
+       when is_binary(conversation_id) do
+    case Process.whereis(Llm.Conversation) do
+      nil ->
+        []
+
+      _pid ->
+        conversation_id
+        |> Llm.Conversation.recent_messages(48, include_assistant?: true)
+        |> Enum.with_index()
+        |> Enum.map(fn {message, index} ->
+          %{
+            id: message_dom_id(message, index),
+            role: Map.get(message, :role, "user"),
+            content: Map.get(message, :content, ""),
+            pending?: false
+          }
+        end)
+    end
+  end
+
+  defp stored_modal_messages(_assigns), do: []
+
+  defp maybe_append_pending_message(messages, %{
+         llm_pending_question: question,
+         llm_loading?: true
+       })
+       when is_binary(question) do
+    question = String.trim(question)
+
+    if question == "" do
+      messages
+    else
+      messages ++
+        [
+          %{
+            id: "pending-user-message",
+            role: "user",
+            content: question,
+            pending?: true
+          },
+          %{
+            id: "pending-assistant-message",
+            role: "assistant",
+            content: "Thinking...",
+            pending?: true
+          }
+        ]
+    end
+  end
+
+  defp maybe_append_pending_message(messages, _assigns), do: messages
+
+  defp message_dom_id(message, index) do
+    role = Map.get(message, :role, "")
+    content = Map.get(message, :content, "")
+
+    :crypto.hash(:sha256, "#{index}:#{role}:#{content}")
+    |> Base.url_encode64(padding: false)
+    |> binary_part(0, 12)
+  end
 
   defp parse_response([], current_lines, segments, nil) do
     text = Enum.reverse(current_lines) |> Enum.join("\n")

@@ -153,6 +153,11 @@
   scrollbar-color: rgb(68 255 120 / 0.55) rgb(2 7 2);
 }
 
+.llm-crt-composer {
+  border-top: 1px solid rgb(68 255 120 / 0.28);
+  background: rgb(3 16 4 / 0.86);
+}
+
 .llm-crt-title {
   color: #c4ffd0;
   letter-spacing: 0;
@@ -196,14 +201,24 @@
   background: rgb(1 10 2 / 0.82);
 }
 
-.llm-crt #llm-response,
-.llm-crt #llm-response .text-base-content,
-.llm-crt #llm-response code,
-.llm-crt #llm-response pre {
+.llm-crt-user-message {
+  border: 1px solid rgb(140 255 158 / 0.36);
+  background: rgb(10 42 12 / 0.72);
+}
+
+.llm-crt-assistant-message {
+  border: 1px solid rgb(68 255 120 / 0.26);
+  background: rgb(2 12 3 / 0.76);
+}
+
+.llm-crt .llm-message-content,
+.llm-crt .llm-message-content .text-base-content,
+.llm-crt .llm-message-content code,
+.llm-crt .llm-message-content pre {
   color: #9dffaf;
 }
 
-.llm-crt #llm-response code {
+.llm-crt .llm-message-content code {
   background: rgb(68 255 120 / 0.1);
   text-shadow: 0 0 7px rgb(140 255 158 / 0.35);
 }
