@@ -175,26 +175,28 @@ defmodule Llm.LlamaServer do
 
   defp server_args do
     [
-      "-m",
+      "--model",
       model_path(),
+      "--alias",
+      model_alias(),
       "--jinja",
       "--host",
       host(),
       "--port",
       to_string(port()),
-      "-fa",
+      "--flash-attn",
       flash_attention(),
-      "-ngl",
+      "--gpu-layers",
       gpu_layers(),
-      "-np",
+      "--parallel",
       to_string(parallel_slots()),
-      "-c",
+      "--ctx-size",
       to_string(context_size()),
-      "-n",
+      "--n-predict",
       to_string(max_tokens()),
-      "-b",
+      "--batch-size",
       to_string(batch_size()),
-      "-ub",
+      "--ubatch-size",
       to_string(micro_batch_size())
     ]
   end
@@ -226,6 +228,14 @@ defmodule Llm.LlamaServer do
     :llm
     |> Application.get_env(:model, @default_model_path)
     |> Path.expand()
+  end
+
+  defp model_alias do
+    Application.get_env(
+      :llm,
+      :alias,
+      Application.get_env(:llm, :model_name, "local-model")
+    )
   end
 
   @spec base_url() :: String.t()

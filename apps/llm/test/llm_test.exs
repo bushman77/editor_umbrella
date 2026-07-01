@@ -18,6 +18,7 @@ defmodule LlmTest do
 
     refute Enum.any?(Llm.Application.child_specs(), &match?({Llm.LlamaServer, []}, &1))
     assert Enum.any?(Llm.Application.child_specs(), &match?({Llm.Conversation, []}, &1))
+    assert Enum.any?(Llm.Application.child_specs(), &match?({Llm.ProjectMemory.Cache, []}, &1))
     assert Enum.any?(Llm.Application.child_specs(), &match?({Llm.Codex, []}, &1))
 
     Application.put_env(:llm, :enabled, true)
@@ -339,6 +340,39 @@ defmodule LlmTest do
     refute content =~ "def run"
   end
 
+  test "project-memory cache reuses idle workspace snapshots and invalidates on file changes" do
+    ensure_project_memory_cache_started()
+    Llm.ProjectMemory.Cache.clear()
+
+    root_path = Path.join(System.tmp_dir!(), "llm-project-memory-cache-test-#{System.unique_integer()}")
+    file_path = Path.join([root_path, "lib", "sample.ex"])
+
+    File.mkdir_p!(Path.dirname(file_path))
+
+    File.write!(file_path, "defmodule Sample do\n  def value, do: :first\nend\n")
+
+    on_exit(fn -> File.rm_rf!(root_path) end)
+
+    assert {:ok, first} = Llm.ProjectMemory.Cache.get(root_path)
+    assert {:ok, second} = Llm.ProjectMemory.Cache.get(root_path)
+
+    assert first == second
+
+    File.write!(file_path, "defmodule Sample do\n  def value, do: :second\nend\n")
+
+    assert {:ok, third} = Llm.ProjectMemory.Cache.get(root_path)
+
+    refute third == first
+
+    contents =
+      third
+      |> Llm.ProjectMemory.get_file_chunks("lib/sample.ex")
+      |> Enum.map(& &1.content)
+      |> Enum.join("\n")
+
+    assert contents =~ ":second"
+  end
+
   test "rag build_context is the editor-aware retrieval boundary" do
     root_path = Path.join(System.tmp_dir!(), "llm-rag-context-test-#{System.unique_integer()}")
     selected_path = Path.join([root_path, "lib", "selected.ex"])
@@ -366,6 +400,36 @@ defmodule LlmTest do
       |> Enum.join("\n")
 
     assert prompt =~ "rag_context_marker"
+  end
+
+  test "rag build_context marks open files as supporting context" do
+    root_path = Path.join(System.tmp_dir!(), "llm-rag-open-files-test-#{System.unique_integer()}")
+    selected_path = Path.join([root_path, "lib", "selected.ex"])
+    open_path = Path.join([root_path, "lib", "open_file.ex"])
+
+    File.mkdir_p!(Path.dirname(selected_path))
+
+    File.write!(selected_path, "defmodule Sample.Selected do\n  def call, do: :selected\nend\n")
+    File.write!(open_path, "defmodule Sample.OpenFile do\n  def helper, do: :open_file_marker\nend\n")
+
+    on_exit(fn -> File.rm_rf!(root_path) end)
+
+    assert {:ok, context} =
+             Llm.Rag.build_context(root_path, selected_path, "What is open?",
+               open_files: [open_path]
+             )
+
+    assert Enum.any?(context.pack.refs, fn ref ->
+             ref.path == "lib/open_file.ex" and ref.metadata[:source] == :open_file
+           end)
+
+    prompt =
+      context.messages
+      |> Enum.map(& &1.content)
+      |> Enum.join("\n")
+
+    assert prompt =~ "SOURCE: open file supporting context"
+    assert prompt =~ "open_file_marker"
   end
 
   test "conversation records user turns without assistant answers by default" do
@@ -1118,6 +1182,12 @@ defmodule LlmTest do
   defp ensure_conversation_started do
     unless Process.whereis(Llm.Conversation) do
       start_supervised!({Llm.Conversation, []})
+    end
+  end
+
+  defp ensure_project_memory_cache_started do
+    unless Process.whereis(Llm.ProjectMemory.Cache) do
+      start_supervised!({Llm.ProjectMemory.Cache, []})
     end
   end
 

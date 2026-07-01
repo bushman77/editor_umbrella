@@ -14,6 +14,7 @@ defmodule Llm.Application do
     [
       {Llm.ConversationStore, []},
       {Llm.Conversation, []},
+      {Llm.ProjectMemory.Cache, []},
       {Llm.Codex, []}
     ] ++ opencode_acp_child_specs() ++ llama_server_child_specs()
   end

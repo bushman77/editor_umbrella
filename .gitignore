@@ -3,5 +3,7 @@ deps/
 .elixir_ls/
 erl_crash.dump
 *.ez
+*.swp
+*.zip
 .env
 .DS_Store

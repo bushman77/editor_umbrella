@@ -8,6 +8,7 @@
 # configurations or dependencies per app, it is best to
 # move said applications out of the umbrella.
 import Config
+import_config "llama.exs"
 
 # Configure Mix tasks and generators
 config :editor,
@@ -26,31 +27,6 @@ config :editor_web,
   ecto_repos: [Editor.Repo],
   generators: [context_app: :editor]
 
-config :llm,
-  enabled: true,
-  model: "~/models/Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf",
-  llama_dir: "~/llama.cpp",
-  llama_server_path: "build/bin/llama-server",
-  host: "127.0.0.1",
-  port: 8000,
-  flash_attention: "on",
-  gpu_layers: "auto",
-  parallel_slots: 1,
-  context_size: 32_768,
-  max_tokens: 8_192,
-  batch_size: 2_048,
-  micro_batch_size: 512,
-  startup_wait_ms: 30_000,
-  poll_interval_ms: 500,
-  tcp_connect_timeout_ms: 1_000,
-  client_receive_timeout: :infinity,
-  client_connect_timeout_ms: 5_000,
-  opencode_acp_enabled: true,
-  opencode_cmd: "opencode",
-  opencode_args: ["acp"],
-  opencode_cwd: File.cwd!()
-
-#    "~/models/qwen3-coder-next/Qwen3-Coder-Next-Q5_K_M/Qwen3-Coder-Next-Q5_K_M-00001-of-00004.gguf"
 # Configures the endpoint
 config :editor_web, EditorWeb.Endpoint,
   url: [host: "localhost"],

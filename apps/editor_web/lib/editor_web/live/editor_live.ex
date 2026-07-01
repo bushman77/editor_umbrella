@@ -297,21 +297,28 @@ defmodule EditorWeb.EditorLive do
 
   @impl true
   def handle_event("clear_llm_conversation", _params, socket) do
-    cwd = socket.assigns.cwd
+    {:noreply, delete_active_llm_conversation(socket)}
+  end
 
-    Llm.Conversation.delete(socket.assigns.llm_conversation_id)
-    Llm.reset_agent_session(cwd)
+  @impl true
+  def handle_event("delete_llm_conversation", %{"id" => conversation_id}, socket) do
+    conversations = Llm.Conversation.list_for_project(socket.assigns.cwd)
 
-    {:noreply,
-     socket
-     |> reset_llm_conversation(cwd)
-     |> assign(:llm_loading?, false)
-     |> assign(:llm_response, nil)
-     |> assign(:llm_messages, [])
-     |> assign(:llm_context, nil)
-     |> assign(:llm_error, nil)
-     |> assign(:llm_pending_question, nil)
-     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))}
+    if Enum.any?(conversations, &(&1.id == conversation_id)) do
+      Llm.Conversation.delete(conversation_id)
+
+      socket =
+        if conversation_id == socket.assigns.llm_conversation_id do
+          reset_active_llm_conversation(socket)
+        else
+          socket
+        end
+        |> refresh_conversation_selector()
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -358,7 +365,7 @@ defmodule EditorWeb.EditorLive do
          socket
          |> EditorLlm.apply_updates(prepared.socket_updates)
          |> start_async(:ask_llm, fn ->
-           EditorLlm.agent_chat(request_assigns, trimmed_question)
+           EditorLlm.tool_agent_chat(request_assigns, trimmed_question)
          end)}
     end
   end
@@ -484,6 +491,7 @@ defmodule EditorWeb.EditorLive do
           <div
             :if={@sidebar_mode == :conversations}
             id="conversation-selector"
+            data-version={@conversation_list_version}
             class="flex-1 overflow-y-auto p-2"
           >
             <div class="mb-2 rounded-md px-2 py-1 text-xs uppercase tracking-wide text-base-content/50">
@@ -491,7 +499,7 @@ defmodule EditorWeb.EditorLive do
             </div>
 
             <div
-              :if={Llm.Conversation.list_for_project(@cwd) == []}
+              :if={conversation_list(@cwd, @conversation_list_version) == []}
               id="conversation-selector-empty"
               class="rounded-md border border-base-300 bg-base-100 px-3 py-3 text-xs text-base-content/60"
             >
@@ -499,24 +507,40 @@ defmodule EditorWeb.EditorLive do
             </div>
 
             <div class="space-y-1">
-              <button
-                :for={conversation <- Llm.Conversation.list_for_project(@cwd)}
-                id={"select-conversation-#{conversation_dom_id(conversation.id)}"}
-                type="button"
-                phx-click="select_llm_conversation"
-                phx-value-id={conversation.id}
+              <div
+                :for={conversation <- conversation_list(@cwd, @conversation_list_version)}
+                id={"conversation-card-#{conversation_dom_id(conversation.id)}"}
                 class={[
-                  "w-full rounded-md px-2 py-2 text-left text-xs transition hover:bg-base-300",
+                  "flex items-start gap-1 rounded-md transition hover:bg-base-300",
                   @llm_conversation_id == conversation.id && "bg-base-300 font-medium"
                 ]}
               >
-                <div class="truncate text-base-content">
-                  {conversation_title(conversation)}
-                </div>
-                <div class="mt-1 truncate text-[0.7rem] text-base-content/50">
-                  {conversation_subtitle(conversation)}
-                </div>
-              </button>
+                <button
+                  id={"select-conversation-#{conversation_dom_id(conversation.id)}"}
+                  type="button"
+                  phx-click="select_llm_conversation"
+                  phx-value-id={conversation.id}
+                  class="min-w-0 flex-1 px-2 py-2 text-left text-xs"
+                >
+                  <div class="truncate text-base-content">
+                    {conversation_title(conversation)}
+                  </div>
+                  <div class="mt-1 truncate text-[0.7rem] text-base-content/50">
+                    {conversation_subtitle(conversation)}
+                  </div>
+                </button>
+
+                <button
+                  id={"delete-conversation-#{conversation_dom_id(conversation.id)}"}
+                  type="button"
+                  phx-click="delete_llm_conversation"
+                  phx-value-id={conversation.id}
+                  aria-label={"Delete #{conversation_title(conversation)}"}
+                  class="mt-1 mr-1 rounded p-1 text-base-content/40 transition hover:bg-base-100 hover:text-error"
+                >
+                  <.icon name="hero-x-mark" class="h-4 w-4" />
+                </button>
+              </div>
             </div>
           </div>
         </aside>
@@ -1150,13 +1174,7 @@ defmodule EditorWeb.EditorLive do
   end
 
   defp llm_request_assigns(assigns) do
-    Map.take(assigns, [
-      :cwd,
-      :selected_file,
-      :related_files,
-      :related_file_context_overrides,
-      :llm_conversation_id
-    ])
+    EditorLlm.request_assigns(assigns)
   end
 
   attr(:text, :string, required: true)
@@ -1190,6 +1208,10 @@ defmodule EditorWeb.EditorLive do
       <% end %>
     </div>
     """
+  end
+
+  defp refresh_conversation_selector(socket) do
+    update(socket, :conversation_list_version, &(&1 + 1))
   end
 
   attr(:items, :list, required: true)
@@ -1392,6 +1414,7 @@ defmodule EditorWeb.EditorLive do
 
   defp base_assigns(socket, workspace_root, cwd) do
     socket
+    |> assign(:conversation_list_version, 0)
     |> assign(:current_scope, nil)
     |> assign(:workspace_root, workspace_root)
     |> assign(:cwd, cwd)
@@ -1410,6 +1433,27 @@ defmodule EditorWeb.EditorLive do
   end
 
   defp reset_llm_conversation(socket, cwd), do: EditorLlm.reset_conversation(socket, cwd)
+
+  defp delete_active_llm_conversation(socket) do
+    Llm.Conversation.delete(socket.assigns.llm_conversation_id)
+    reset_active_llm_conversation(socket)
+  end
+
+  defp reset_active_llm_conversation(socket) do
+    cwd = socket.assigns.cwd
+
+    Llm.reset_agent_session(cwd)
+
+    socket
+    |> reset_llm_conversation(cwd)
+    |> assign(:llm_loading?, false)
+    |> assign(:llm_response, nil)
+    |> assign(:llm_messages, [])
+    |> assign(:llm_context, nil)
+    |> assign(:llm_error, nil)
+    |> assign(:llm_pending_question, nil)
+    |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
+  end
 
   defp maybe_restore_selected_file(socket, nil), do: socket
 
@@ -1853,6 +1897,14 @@ defmodule EditorWeb.EditorLive do
     :crypto.hash(:sha256, id)
     |> Base.url_encode64(padding: false)
     |> binary_part(0, 12)
+  end
+
+  defp refresh_conversation_selector(socket) do
+    update(socket, :conversation_list_version, &(&1 + 1))
+  end
+
+  defp conversation_list(project_id, _version) do
+    Llm.Conversation.list_for_project(project_id)
   end
 
   defp pluralize(1, singular), do: singular

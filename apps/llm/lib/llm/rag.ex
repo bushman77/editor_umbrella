@@ -37,7 +37,7 @@ defmodule Llm.Rag do
     recent_messages = Keyword.get(opts, :recent_messages, [])
     conversation_summary = Keyword.get(opts, :conversation_summary)
 
-    with {:ok, project_memory} <- ProjectMemory.Builder.build(root_path),
+    with {:ok, project_memory} <- ProjectMemory.Cache.get(root_path),
          {:ok, project_memory} <-
            ensure_selected_file_memory(project_memory, root_path, selected_file),
          {:ok, project_memory} <-

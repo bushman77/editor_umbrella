@@ -6,7 +6,35 @@ defmodule EditorWeb.EditorLlm do
   @llm_open_file_max_chars 12_000
   @llm_open_file_total_max_chars 48_000
 
+  @edit_intent_words [
+    "apply",
+    "change",
+    "clean up",
+    "deal with",
+    "delete",
+    "deduplicate",
+    "fix",
+    "handle",
+    "implement",
+    "move",
+    "refactor",
+    "remove",
+    "rename",
+    "replace",
+    "rewrite",
+    "simplify",
+    "update"
+  ]
+
+  @recommendation_intent_words [
+    "recommendation",
+    "recommendations",
+    "item",
+    "items"
+  ]
+
   @type response_segment :: {:text, String.t()} | {:code, String.t(), String.t()}
+
   @type modal_message :: %{
           id: String.t(),
           role: String.t(),
@@ -30,6 +58,16 @@ defmodule EditorWeb.EditorLlm do
           start_line: pos_integer(),
           end_line: pos_integer()
         }
+
+  @request_assign_keys [
+    :cwd,
+    :selected_file,
+    :related_files,
+    :related_file_context_overrides,
+    :llm_conversation_id,
+    :cached_open_files,
+    :open_tabs
+  ]
 
   @spec assign_defaults(term(), String.t()) :: term()
   def assign_defaults(socket, cwd) do
@@ -65,6 +103,12 @@ defmodule EditorWeb.EditorLlm do
 
   def apply_updates(socket, updates) when is_list(updates) do
     Enum.reduce(updates, socket, fn {key, value}, acc -> assign(acc, key, value) end)
+  end
+
+  @doc false
+  @spec request_assigns(map()) :: map()
+  def request_assigns(assigns) when is_map(assigns) do
+    Map.take(assigns, @request_assign_keys)
   end
 
   @spec prepare_request(map(), String.t() | nil) ::
@@ -103,9 +147,10 @@ defmodule EditorWeb.EditorLlm do
   @spec agent_chat(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def agent_chat(assigns, question) when is_map(assigns) and is_binary(question) do
     with {:ok, context} <- request_context(assigns, question),
+         prepared_question = prepare_agent_question(assigns, question),
          {:ok, response} <-
            Llm.agent_chat(
-             question,
+             prepared_question,
              cwd: assigns.cwd,
              context: context,
              buffer_context: editor_buffer_context()
@@ -114,6 +159,67 @@ defmodule EditorWeb.EditorLlm do
        %{
          response: response,
          llm_context: preview_context(context, assigns, question)
+       }}
+    end
+  end
+
+  @spec tool_agent_chat(map(), String.t()) ::
+          {:ok, %{response: String.t() | map(), llm_context: map() | nil}} | {:error, term()}
+  def tool_agent_chat(assigns, question) when is_map(assigns) and is_binary(question) do
+    cwd = Map.fetch!(assigns, :cwd)
+    selected_file = Map.get(assigns, :selected_file)
+
+    system_message = """
+    You are a local editor assistant operating inside one workspace.
+
+    Tool-use rules:
+    - Use only the provided read-only editor tools.
+    - The workspace root is authoritative. Never operate outside it.
+    - If the user does not specify a path, search from ".".
+    - Do not use editor_read_file on a directory.
+    - Use editor_search_text to find candidate files.
+    - Use editor_list_files to discover project structure.
+    - Use editor_read_file only on a specific file path returned by search/list results or on the selected file.
+    - If the user asks to explain an implementation, search first, then read the most relevant file, then answer.
+    - Do not claim that something does not exist until you have searched from "." or from the user-specified path.
+    - Do not say "I will now search" after tool use. Either use a tool or answer from the results.
+    - Prefer concise answers with file paths, line numbers from search results, and clear reasoning.
+    - If the user asks to search but does not specify a path, use editor_search_workspace first.
+    - Use editor_search_text only when the user explicitly provides a directory or file path.
+    - If the user asks to explain an implementation, search first, then read the most relevant file, then answer.
+    - Do not conclude something does not exist after searching only a narrow guessed path.
+    - Do not use editor_read_file on a directory.
+    """
+
+    user_message = """
+    Workspace root:
+    #{cwd}
+
+    Selected file:
+    #{selected_file || "(none)"}
+
+    User question:
+    #{question}
+    """
+
+    messages = [
+      %{role: "system", content: system_message},
+      %{role: "user", content: user_message}
+    ]
+
+    with {:ok, response} <-
+           Llm.tool_chat(messages,
+             max_tool_rounds: 6,
+             max_tokens: 1_024
+           ) do
+      {:ok,
+       %{
+         response: response,
+         llm_context: %{
+           mode: :native_tool_loop,
+           cwd: cwd,
+           selected_file: selected_file
+         }
        }}
     end
   end
@@ -219,7 +325,9 @@ defmodule EditorWeb.EditorLlm do
   def response_segments(nil), do: []
 
   def response_segments(response) when is_binary(response) do
-    parse_response(String.split(response, "\n", trim: false), [], [], nil)
+    response
+    |> String.split("\n", trim: false)
+    |> parse_response([], [], nil)
     |> Enum.reverse()
     |> Enum.reject(fn
       {:text, text} -> String.trim(text) == ""
@@ -362,6 +470,89 @@ defmodule EditorWeb.EditorLlm do
     end)
   end
 
+  defp prepare_agent_question(assigns, question) do
+    question = String.trim(question || "")
+
+    if edit_intent?(question) do
+      edit_agent_question(assigns, question)
+    else
+      question
+    end
+  end
+
+  defp edit_intent?(question) when is_binary(question) do
+    text = String.downcase(question)
+
+    contains_any?(text, @edit_intent_words) or
+      recommendation_edit_intent?(text)
+  end
+
+  defp edit_intent?(_question), do: false
+
+  defp recommendation_edit_intent?(text) when is_binary(text) do
+    contains_any?(text, @recommendation_intent_words) and
+      String.contains?(text, ["1", "2", "3", "one", "two", "three", "through", "to", "-"])
+  end
+
+  defp contains_any?(text, words) when is_binary(text) and is_list(words) do
+    Enum.any?(words, &String.contains?(text, &1))
+  end
+
+  defp edit_agent_question(assigns, question) do
+    cwd = Map.get(assigns, :cwd)
+    selected_file = Map.get(assigns, :selected_file)
+    selected_file_label = selected_file_label(selected_file, cwd)
+
+    """
+    You are acting as this editor's code-change agent.
+
+    Workspace root:
+    #{cwd}
+
+    Selected file:
+    #{selected_file_label}
+
+    User request:
+    #{question}
+
+    Output contract:
+    - Return only a unified diff inside a fenced diff code block.
+    - Do not write a tutorial.
+    - Do not repeat generic recommendations.
+    - Do not say "Certainly", "I can help", or similar filler.
+    - Do not claim changes unless the diff contains the change.
+    - Preserve public APIs unless the user explicitly asks otherwise.
+    - Keep the patch minimal, focused, and compilable.
+    - Patch the selected file unless the user clearly names another file.
+    - If the selected file is missing or the request needs another file, return exactly: NEED_MORE_CONTEXT: reason.
+    - If no code change is needed, return exactly: NO_CHANGE_NEEDED: reason.
+    """
+  end
+
+  defp selected_file_label(path, cwd) when is_binary(path) and is_binary(cwd) do
+    expanded_cwd = Path.expand(cwd)
+
+    expanded_path =
+      if Path.type(path) == :absolute do
+        Path.expand(path)
+      else
+        Path.expand(path, expanded_cwd)
+      end
+
+    relative = Path.relative_to(expanded_path, expanded_cwd)
+
+    if relative == expanded_path do
+      path
+    else
+      relative
+    end
+  rescue
+    _ -> path
+  end
+
+  defp selected_file_label(path, _cwd) when is_binary(path), do: path
+  defp selected_file_label(_path, _cwd), do: "[none]"
+
   defp new_conversation_id(cwd) do
     conversation_id = Llm.Conversation.new_id(cwd)
     Llm.Conversation.ensure(conversation_id, project_id: cwd)
@@ -499,9 +690,7 @@ defmodule EditorWeb.EditorLlm do
       cached_open_files
       |> open_files_for_prompt()
       |> Enum.map_join(
-        "
-
-",
+        "\n\n",
         &format_cached_open_file/1
       )
 

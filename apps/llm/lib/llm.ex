@@ -50,6 +50,28 @@ defmodule Llm do
     end
   end
 
+  @doc """
+  Sends a prompt or message list through the local tool-capable LLM loop.
+
+  This is the public API wrapper around `Llm.ToolLoop`. Web/editor modules
+  should call this instead of calling `Llm.ToolLoop` directly.
+  """
+  @spec tool_chat(String.t() | [map()], keyword()) :: {:ok, String.t() | map()} | {:error, term()}
+  def tool_chat(message_or_messages, opts \\ [])
+
+  def tool_chat(prompt, opts) when is_binary(prompt) and is_list(opts) do
+    tool_chat([%{role: "user", content: prompt}], opts)
+  end
+
+  def tool_chat(messages, opts) when is_list(messages) and is_list(opts) do
+    opts =
+      opts
+      |> Keyword.put_new(:max_tool_rounds, 4)
+      |> Keyword.put_new(:max_tokens, 1_024)
+
+    Llm.ToolLoop.run(messages, opts)
+  end
+
   @spec agent_chat(String.t(), keyword()) :: chat_result()
   def agent_chat(prompt, opts \\ []) when is_binary(prompt) and is_list(opts) do
     cwd = Keyword.get(opts, :cwd, opencode_cwd())

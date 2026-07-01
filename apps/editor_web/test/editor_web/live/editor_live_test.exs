@@ -2,6 +2,29 @@ defmodule EditorWeb.EditorLiveTest do
   use EditorWeb.ConnCase, async: true
 
   import Phoenix.LiveViewTest
+
+  test "llm async request payload keeps open-file context" do
+    source_file = "/workspace/apps/editor_web/lib/editor_web/live/editor_live.ex"
+    open_file = "/workspace/apps/editor/lib/editor/open_file_cache.ex"
+
+    assigns = %{
+      cwd: "/workspace",
+      selected_file: source_file,
+      related_files: [],
+      related_file_context_overrides: %{},
+      llm_conversation_id: "conversation-1",
+      cached_open_files: [%{path: open_file}],
+      open_tabs: [source_file, open_file],
+      large_unrelated_assign: String.duplicate("x", 1_000)
+    }
+
+    request_assigns = EditorWeb.EditorLlm.request_assigns(assigns)
+
+    assert request_assigns.cached_open_files == [%{path: open_file}]
+    assert request_assigns.open_tabs == [source_file, open_file]
+    refute Map.has_key?(request_assigns, :large_unrelated_assign)
+  end
+
   #########################################
   # TESTS 
   #########################################
@@ -375,7 +398,7 @@ defmodule EditorWeb.EditorLiveTest do
     |> render_click()
 
     view
-    |> element("button[phx-value-id='#{conversation_id}']")
+    |> element("button[phx-click='select_llm_conversation'][phx-value-id='#{conversation_id}']")
     |> render_click()
 
     view
@@ -470,5 +493,44 @@ defmodule EditorWeb.EditorLiveTest do
     :crypto.hash(:sha256, path)
     |> Base.url_encode64(padding: false)
     |> binary_part(0, 12)
+  end
+
+  @tag :tmp_dir
+  test "conversation selector deletes saved conversations", %{
+    conn: conn,
+    tmp_dir: tmp_dir
+  } do
+    conversation_id = Llm.Conversation.new_id(tmp_dir)
+
+    Llm.Conversation.record_turn(
+      conversation_id,
+      "Delete me marker?",
+      "Delete answer marker.",
+      project_id: tmp_dir,
+      current_file: nil,
+      store_assistant?: true
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    open_folder(view, tmp_dir)
+
+    view
+    |> element("#show-conversations-sidebar-button")
+    |> render_click()
+
+    assert has_element?(view, "#conversation-selector", "Delete me marker?")
+
+    view
+    |> element("button[phx-value-id='#{conversation_id}'][phx-click='delete_llm_conversation']")
+    |> render_click()
+
+    refute Enum.any?(
+             Llm.Conversation.list_for_project(tmp_dir),
+             &(&1.id == conversation_id)
+           )
+
+    assert Llm.Conversation.get(conversation_id) == nil
+    refute render(view) =~ "Delete me marker?"
   end
 end
