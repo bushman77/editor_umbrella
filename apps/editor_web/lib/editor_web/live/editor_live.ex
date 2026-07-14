@@ -1,6 +1,7 @@
 defmodule EditorWeb.EditorLive do
   use EditorWeb, :live_view
-
+  alias EditorWeb.WorkspaceProjects
+  alias Editor.Workspaces
   alias EditorWeb.EditorLlm
   alias EditorWeb.EditorState
   alias EditorWeb.EditorWorkspace, as: Workspace
@@ -61,6 +62,10 @@ defmodule EditorWeb.EditorLive do
     {:noreply, assign(socket, :sidebar_mode, :files)}
   end
 
+  def handle_event("show_sidebar_mode", %{"mode" => "projects"}, socket) do
+    {:noreply, assign(socket, :sidebar_mode, :projects)}
+  end
+
   def handle_event("show_sidebar_mode", %{"mode" => "conversations"}, socket) do
     {:noreply, assign(socket, :sidebar_mode, :conversations)}
   end
@@ -104,7 +109,8 @@ defmodule EditorWeb.EditorLive do
          |> assign(:cwd, path)
          |> assign(:entries, entries)
          |> reset_llm_conversation(path)
-         |> assign(:error_message, nil)}
+         |> assign(:error_message, nil)
+         |> maybe_fetch_git_status(path)}
 
       {:error, message} ->
         {:noreply, assign(socket, :error_message, message)}
@@ -254,7 +260,8 @@ defmodule EditorWeb.EditorLive do
          |> assign(:cwd, path)
          |> assign(:entries, entries)
          |> reset_llm_conversation(path)
-         |> assign(:error_message, nil)}
+         |> assign(:error_message, nil)
+         |> maybe_fetch_git_status(path)}
 
       {:error, message} ->
         {:noreply, assign(socket, :error_message, message)}
@@ -347,9 +354,8 @@ defmodule EditorWeb.EditorLive do
     end
   end
 
-  @impl true
   def handle_event("ask_llm", %{"llm" => %{"question" => question}}, socket) do
-    case EditorLlm.prepare_request(socket.assigns, question) do
+    case EditorLlm.prepare_request(llm_request_assigns(socket.assigns), question) do
       {:noop, :loading} ->
         {:noreply, socket}
 
@@ -357,13 +363,14 @@ defmodule EditorWeb.EditorLive do
         {:noreply, EditorLlm.apply_updates(socket, socket_updates)}
 
       {:ok, prepared} ->
-        # Keep async payload small; do not pass the full socket assigns map.
         request_assigns = llm_request_assigns(socket.assigns)
         trimmed_question = String.trim(question || "")
 
         {:noreply,
          socket
          |> EditorLlm.apply_updates(prepared.socket_updates)
+         |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))
+         |> push_event("editor:clear_llm_input", %{})
          |> start_async(:ask_llm, fn ->
            EditorLlm.tool_agent_chat(request_assigns, trimmed_question)
          end)}
@@ -381,7 +388,28 @@ defmodule EditorWeb.EditorLive do
         {:ok, {:ok, %{response: response, llm_context: llm_context}}},
         socket
       ) do
-    {:noreply, EditorLlm.handle_success(socket, response, llm_context)}
+    {:noreply,
+     EditorLlm.handle_success(socket, response, llm_context)
+     |> assign(:llm_form, to_form(%{"question" => ""}, as: :llm))}
+  end
+
+  @impl true
+  def handle_async({:git_status, cwd}, {:ok, {:ok, status}}, socket) do
+    if socket.assigns.cwd == cwd do
+      {:noreply, assign(socket, :cwd_git_status, status)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_async({:git_status, _cwd}, {:ok, {:error, _reason}}, socket) do
+    {:noreply, assign(socket, :cwd_git_status, nil)}
+  end
+
+  @impl true
+  def handle_async({:git_status, _cwd}, {:exit, _reason}, socket) do
+    {:noreply, assign(socket, :cwd_git_status, nil)}
   end
 
   @impl true
@@ -407,7 +435,7 @@ defmodule EditorWeb.EditorLive do
           <div class="border-b border-base-300 p-2">
             <div
               id="sidebar-mode-toggle"
-              class="mb-2 grid grid-cols-2 gap-1 rounded-md bg-base-300/50 p-1 text-xs"
+              class="mb-2 grid grid-cols-3 gap-1 rounded-md bg-base-300/50 p-1 text-xs"
             >
               <button
                 id="show-files-sidebar-button"
@@ -425,6 +453,21 @@ defmodule EditorWeb.EditorLive do
               </button>
 
               <button
+                id="show-projects-sidebar-button"
+                type="button"
+                phx-click="show_sidebar_mode"
+                phx-value-mode="projects"
+                aria-pressed={to_string(@sidebar_mode == :projects)}
+                class={[
+                  "rounded px-2 py-1 font-medium transition",
+                  @sidebar_mode == :projects && "bg-base-100 text-base-content shadow-sm",
+                  @sidebar_mode != :projects && "text-base-content/60 hover:bg-base-200"
+                ]}
+              >
+                Projects
+              </button>
+
+              <button
                 id="show-conversations-sidebar-button"
                 type="button"
                 phx-click="show_sidebar_mode"
@@ -436,7 +479,7 @@ defmodule EditorWeb.EditorLive do
                   @sidebar_mode != :conversations && "text-base-content/60 hover:bg-base-200"
                 ]}
               >
-                Conversations
+                Chats
               </button>
             </div>
 
@@ -485,6 +528,130 @@ defmodule EditorWeb.EditorLive do
               <%= for entry <- @entries do %>
                 <.tree_node entry={entry} depth={0} selected_file={@selected_file} />
               <% end %>
+            </div>
+          </div>
+
+          <div
+            :if={@sidebar_mode == :projects}
+            id="project-manager"
+            class="flex-1 overflow-y-auto p-2"
+          >
+            <div class="mb-2 rounded-md px-2 py-1 text-xs uppercase tracking-wide text-base-content/50">
+              Projects
+            </div>
+
+            <%= if @project_error do %>
+              <div
+                id="project-error"
+                class="mb-2 rounded-md border border-error/30 bg-error/10 px-2 py-2 text-xs text-error"
+              >
+                {@project_error}
+              </div>
+            <% end %>
+
+            <%= if @project_success do %>
+              <div
+                id="project-success"
+                class="mb-2 rounded-md border border-success/30 bg-success/10 px-2 py-2 text-xs text-success"
+              >
+                {@project_success}
+              </div>
+            <% end %>
+
+            <.form
+              for={@project_form}
+              id="add-project-form"
+              phx-submit="add_project"
+              class="mb-4 space-y-2"
+            >
+              <.input
+                field={@project_form[:name]}
+                id="project-name"
+                type="text"
+                placeholder="Project name"
+                class="w-full rounded-md border border-base-300 bg-base-100 px-2 py-1.5 text-xs outline-none transition focus:border-primary"
+              />
+              <.input
+                field={@project_form[:git_url]}
+                id="project-git-url"
+                type="text"
+                placeholder="git@github.com:org/repo.git"
+                class="w-full rounded-md border border-base-300 bg-base-100 px-2 py-1.5 text-xs outline-none transition focus:border-primary"
+              />
+              <.input
+                field={@project_form[:branch]}
+                id="project-branch"
+                type="text"
+                placeholder="main"
+                class="w-full rounded-md border border-base-300 bg-base-100 px-2 py-1.5 text-xs outline-none transition focus:border-primary"
+              />
+              <button
+                id="add-project-button"
+                type="submit"
+                class="w-full rounded-md border border-base-300 bg-base-200 px-2 py-1.5 text-xs font-medium transition hover:bg-base-300"
+              >
+                Add Project
+              </button>
+            </.form>
+
+            <div
+              :if={@projects == []}
+              id="projects-empty"
+              class="rounded-md border border-base-300 bg-base-100 px-3 py-3 text-xs text-base-content/60"
+            >
+              No projects yet. Add one above to clone it.
+            </div>
+
+            <div class="space-y-2">
+              <div
+                :for={project <- @projects}
+                id={"project-card-#{project.id}"}
+                class="rounded-md border border-base-300 bg-base-100 p-2"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <button
+                    id={"select-project-#{project.id}"}
+                    type="button"
+                    phx-click="select_project"
+                    phx-value-id={project.id}
+                    class="min-w-0 flex-1 text-left"
+                  >
+                    <div class="truncate text-sm font-medium">{project.name}</div>
+                    <div class="mt-1 truncate text-[0.7rem] text-base-content/50">
+                      {project.git_url}
+                    </div>
+                    <div class="mt-1 text-[0.7rem] text-base-content/50">
+                      {WorkspaceProjects.sync_status_label(project)}
+                    </div>
+                  </button>
+                </div>
+
+                <div class="mt-2 flex gap-2">
+                  <button
+                    id={"sync-project-#{project.id}"}
+                    type="button"
+                    phx-click="sync_project"
+                    phx-value-id={project.id}
+                    disabled={WorkspaceProjects.syncing?(assigns, project.id)}
+                    class="flex-1 rounded-md border border-base-300 bg-base-200 px-2 py-1.5 text-xs font-medium transition hover:bg-base-300 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {if WorkspaceProjects.syncing?(assigns, project.id),
+                      do: "Syncing...",
+                      else: "Sync"}
+                  </button>
+
+                  <button
+                    id={"delete-project-#{project.id}"}
+                    type="button"
+                    phx-click="delete_project"
+                    phx-value-id={project.id}
+                    aria-label={"Delete #{project.name}"}
+                    class="rounded-md border border-error/40 bg-error/10 px-2 py-1.5 text-xs font-medium text-error transition hover:bg-error/20"
+                  >
+                    <.icon name="hero-x-mark" class="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -687,11 +854,26 @@ defmodule EditorWeb.EditorLive do
                 <div class="truncate text-sm font-medium">
                   {selected_file_label(@selected_file)}
                 </div>
-                <div class="mt-1 text-xs text-base-content/60">
+                <div class="mt-1 flex items-center gap-2 text-xs text-base-content/60">
                   <%= if @selected_file do %>
-                    {if @dirty?, do: "Unsaved changes", else: "Saved"}
+                    <span>{if @dirty?, do: "Unsaved changes", else: "Saved"}</span>
                   <% else %>
-                    Ask the LLM about the current folder or open a file for file-specific context.
+                    <span>
+                      Ask the LLM about the current folder or open a file for file-specific context.
+                    </span>
+                  <% end %>
+
+                  <%= if @cwd_git_status do %>
+                    <span class="rounded bg-base-300 px-1.5 py-0.5 font-mono text-[0.65rem]">
+                      {@cwd_git_status.branch}
+                    </span>
+                    <%= if @cwd_git_status.dirty? do %>
+                      <span class="text-warning">
+                        {length(@cwd_git_status.dirty_files)} modified
+                      </span>
+                    <% else %>
+                      <span class="text-success">clean</span>
+                    <% end %>
                   <% end %>
                 </div>
               </div>
@@ -1136,12 +1318,17 @@ defmodule EditorWeb.EditorLive do
                       {@llm_error}
                     </div>
                   <% end %>
-
-                  <.form for={@llm_form} id="llm-form" phx-submit="ask_llm" class="space-y-3">
+                  <.form
+                    for={@llm_form}
+                    id="llm-form"
+                    phx-submit={JS.push("ask_llm") |> JS.dispatch("reset", to: "#llm-form")}
+                    class="space-y-3"
+                  >
                     <.input
                       field={@llm_form[:question]}
                       id="llm-question"
                       type="text"
+                      phx-hook="ClearLlmInput"
                       placeholder="Ask about the current file or folder"
                       class="llm-crt-input w-full rounded px-3 py-2 text-sm outline-none transition"
                     />
@@ -1430,6 +1617,21 @@ defmodule EditorWeb.EditorLive do
     |> assign(:form, to_form(%{"folder_path" => cwd}, as: :explorer))
     |> assign(:editor_form, to_form(%{"content" => ""}, as: :editor))
     |> EditorLlm.assign_defaults(cwd)
+    |> WorkspaceProjects.assign_defaults()
+    |> assign(:cwd_git_status, nil)
+    |> maybe_fetch_git_status(cwd)
+  end
+
+  defp maybe_fetch_git_status(socket, cwd) do
+    if File.dir?(Path.join(cwd, ".git")) do
+      socket
+      |> assign(:cwd_git_status, nil)
+      |> start_async({:git_status, cwd}, fn ->
+        Editor.Workspaces.Git.status(%{local_path: cwd})
+      end)
+    else
+      assign(socket, :cwd_git_status, nil)
+    end
   end
 
   defp reset_llm_conversation(socket, cwd), do: EditorLlm.reset_conversation(socket, cwd)
@@ -1899,14 +2101,102 @@ defmodule EditorWeb.EditorLive do
     |> binary_part(0, 12)
   end
 
-  defp refresh_conversation_selector(socket) do
-    update(socket, :conversation_list_version, &(&1 + 1))
-  end
-
   defp conversation_list(project_id, _version) do
     Llm.Conversation.list_for_project(project_id)
   end
 
   defp pluralize(1, singular), do: singular
   defp pluralize(_count, singular), do: singular <> "s"
+
+  def handle_event("add_project", %{"project" => params}, socket) do
+    case WorkspaceProjects.prepare_create(params) do
+      {:ok, project_attrs} ->
+        case Workspaces.create_project(project_attrs) do
+          {:ok, project} ->
+            {:noreply, WorkspaceProjects.handle_create_success(socket, project)}
+
+          {:error, changeset} ->
+            {:noreply, WorkspaceProjects.handle_create_failure(socket, changeset)}
+        end
+
+      {:error, socket_updates} ->
+        {:noreply,
+         WorkspaceProjects.assign_defaults(socket)
+         |> then(fn s ->
+           Enum.reduce(socket_updates, s, fn {k, v}, acc -> assign(acc, k, v) end)
+         end)}
+    end
+  end
+
+  def handle_event("sync_project", %{"id" => project_id}, socket) do
+    case Workspaces.get_project(project_id) do
+      nil ->
+        {:noreply, assign(socket, :project_error, "Project not found.")}
+
+      project ->
+        socket = WorkspaceProjects.mark_syncing(socket, project.id)
+
+        {:noreply,
+         socket
+         |> assign(:project_error, nil)
+         |> start_async({:sync_project, project.id}, fn ->
+           Editor.Workspaces.Sync.run(project)
+         end)}
+    end
+  end
+
+  def handle_event("delete_project", %{"id" => project_id}, socket) do
+    case Workspaces.delete_project(project_id) do
+      {:ok, _project} ->
+        {:noreply, WorkspaceProjects.refresh_projects(socket)}
+
+      {:error, :not_found} ->
+        {:noreply, assign(socket, :project_error, "Project not found.")}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :project_error, "Could not delete: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("select_project", %{"id" => project_id}, socket) do
+    case Workspaces.resolve(project_id) do
+      {:ok, workspace} ->
+        socket =
+          socket
+          |> assign(:cwd, workspace.root)
+          |> assign(:workspace_root, workspace.root)
+          |> assign(:entries, EditorWorkspace.load_entries(workspace.root, workspace.root))
+          |> clear_editor()
+          |> reset_llm_conversation(workspace.root)
+          |> maybe_fetch_git_status(workspace.root)
+
+        {:noreply, socket}
+
+      {:error, :not_found} ->
+        {:noreply, assign(socket, :project_error, "Project not found.")}
+    end
+  end
+
+  def handle_async({:sync_project, project_id}, {:ok, {:ok, _project, _info}}, socket) do
+    {:noreply,
+     socket
+     |> WorkspaceProjects.clear_syncing(project_id)
+     |> WorkspaceProjects.refresh_projects()
+     |> assign(:project_success, "Sync complete.")}
+  end
+
+  def handle_async({:sync_project, project_id}, {:ok, {:error, _project, reason}}, socket) do
+    {:noreply,
+     socket
+     |> WorkspaceProjects.clear_syncing(project_id)
+     |> WorkspaceProjects.refresh_projects()
+     |> assign(:project_error, "Sync failed: #{inspect(reason)}")}
+  end
+
+  def handle_async({:sync_project, project_id}, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> WorkspaceProjects.clear_syncing(project_id)
+     |> assign(:project_error, "Sync crashed: #{inspect(reason)}")}
+  end
 end

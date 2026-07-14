@@ -7,7 +7,6 @@ defmodule Llm.ToolRouter do
     * Unknown tools return structured errors.
     * No arbitrary shell execution.
     * File tools must stay inside the provided workspace root.
-    * Start read-only. Writes/patches come later behind explicit approval.
   """
 
   @type tool_name :: String.t()
@@ -19,6 +18,196 @@ defmodule Llm.ToolRouter do
   @spec tools() :: [map()]
   def tools do
     [
+      # Add to tools/0 list
+      %{
+        type: "function",
+        function: %{
+          name: "editor_patch_file",
+          description:
+            "Applies a search-and-replace patch to a file. More efficient than rewriting the whole file. The search text must match exactly (including whitespace). Returns the patched content for verification.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              path: %{type: "string", description: "File path to patch."},
+              search: %{type: "string", description: "The exact text to find in the file."},
+              replace: %{type: "string", description: "The text to replace the search text with."},
+              all: %{
+                type: "boolean",
+                description:
+                  "If true, replace all occurrences. If false (default), only replace the first."
+              }
+            },
+            required: ["root", "path", "search", "replace"]
+          }
+        }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "editor_git_diff_stat",
+          description:
+            "Shows a compact summary of which files changed and how many insertions/deletions. Faster than full diff for understanding scope of changes.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              path: %{type: "string", description: "Optional file or directory path to limit."},
+              ref: %{
+                type: "string",
+                description:
+                  "Optional commit/branch to compare against HEAD. Defaults to HEAD (uncommitted changes)."
+              }
+            },
+            required: ["root"]
+          }
+        }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "mix_deps_get",
+          description:
+            "Runs mix deps.get to fetch and install project dependencies. Use this when dependencies are missing or need updating before compiling or running tests.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              timeout_ms: %{
+                type: "integer",
+                description:
+                  "Maximum execution time in milliseconds. Defaults to 120000 (2 minutes)."
+              }
+            },
+            required: ["root"]
+          }
+        }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "mix_test",
+          description:
+            "Runs the Elixir test suite using mix test. Can run all tests, a specific test file, or a specific test at a line number. Returns test output including failures and errors. Use this to verify code changes work correctly.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              path: %{
+                type: "string",
+                description: "Optional test file path to run, e.g. test/my_app_test.exs"
+              },
+              line: %{
+                type: "integer",
+                description:
+                  "Optional line number to run a specific test. Must be used with path."
+              },
+              timeout_ms: %{
+                type: "integer",
+                description:
+                  "Maximum execution time in milliseconds. Defaults to 120000 (2 minutes)."
+              }
+            },
+            required: ["root"]
+          }
+        }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "mix_compile",
+          description:
+            "Compiles the Elixir project using mix compile. Returns compiler output including warnings and errors. Use this to check if code changes compile before running tests.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              warnings_as_errors: %{
+                type: "boolean",
+                description: "Treat warnings as errors. Defaults to false."
+              },
+              timeout_ms: %{
+                type: "integer",
+                description:
+                  "Maximum execution time in milliseconds. Defaults to 60000 (1 minute)."
+              }
+            },
+            required: ["root"]
+          }
+        }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "editor_git_diff",
+          description:
+            "Shows git diffs. Can show uncommitted changes (unstaged, staged, or all vs HEAD), a specific commit, or diff between two refs. Optional path limits to a specific file or directory.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              path: %{
+                type: "string",
+                description: "Optional file or directory path to limit the diff."
+              },
+              mode: %{
+                type: "string",
+                enum: ["unstaged", "staged", "all", "commit", "between"],
+                description:
+                  "Diff mode: 'unstaged' (working tree vs index), 'staged' (index vs HEAD), 'all' (working tree vs HEAD, default), 'commit' (show specific commit, requires 'ref'), 'between' (diff two refs, requires 'ref' and 'ref2')."
+              },
+              ref: %{
+                type: "string",
+                description:
+                  "Commit hash, branch, or tag. Required for 'commit' mode, first ref for 'between' mode."
+              },
+              ref2: %{
+                type: "string",
+                description: "Second ref for 'between' mode (commit hash, branch, or tag)."
+              }
+            },
+            required: ["root"]
+          }
+        }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "editor_git_log",
+          description:
+            "Shows recent commit history. Optional path limits to commits touching a specific file.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              path: %{type: "string", description: "Optional file path to limit log entries."},
+              limit: %{
+                type: "integer",
+                description: "Maximum number of commits to return. Defaults to 10."
+              }
+            },
+            required: ["root"]
+          }
+        }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "editor_git_blame",
+          description:
+            "Shows who wrote specific lines and when. Useful for understanding why code looks the way it does.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              path: %{type: "string", description: "File path to blame."},
+              start_line: %{type: "integer", description: "First line number to blame."},
+              end_line: %{type: "integer", description: "Last line number to blame."}
+            },
+            required: ["root", "path", "start_line", "end_line"]
+          }
+        }
+      },
       %{
         type: "function",
         function: %{
@@ -51,18 +240,6 @@ defmodule Llm.ToolRouter do
               }
             },
             required: ["root", "query"]
-          }
-        }
-      },
-      %{
-        type: "function",
-        function: %{
-          name: "echo_hello_world",
-          description: "Runs a whitelisted echo command that returns Hello World.",
-          parameters: %{
-            type: "object",
-            properties: %{},
-            required: []
           }
         }
       },
@@ -171,10 +348,227 @@ defmodule Llm.ToolRouter do
             required: ["root", "query"]
           }
         }
+      },
+      %{
+        type: "function",
+        function: %{
+          name: "editor_write_file",
+          description: "Writes or overwrites a file inside the workspace root.",
+          parameters: %{
+            type: "object",
+            properties: %{
+              root: %{type: "string", description: "Absolute workspace root directory."},
+              path: %{type: "string", description: "File path to write."},
+              content: %{
+                type: "string",
+                description: "The full text content to write to the file."
+              }
+            },
+            required: ["root", "path", "content"]
+          }
+        }
       }
     ]
   end
 
+  def call("mix_test", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, absolute_root} <- workspace_root(root),
+         {:ok, path} <- optional_string(args, "path", nil),
+         {:ok, line} <- optional_integer(args, "line", nil),
+         {:ok, timeout_ms} <- positive_integer_arg(args, "timeout_ms", 120_000),
+         {:ok, test_args} <- build_test_args(absolute_root, path, line),
+         {:ok, output, exit_status, timed_out?} <-
+           run_mix_task(absolute_root, "test", test_args, timeout_ms) do
+      {:ok,
+       %{
+         root: absolute_root,
+         path: path,
+         line: line,
+         exit_status: exit_status,
+         timed_out: timed_out?,
+         output: truncate_task_output(output)
+       }}
+    end
+  end
+
+  def call("mix_deps_get", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, absolute_root} <- workspace_root(root),
+         {:ok, timeout_ms} <- positive_integer_arg(args, "timeout_ms", 120_000),
+         {:ok, output, exit_status, timed_out?} <-
+           run_mix_task(absolute_root, "deps.get", [], timeout_ms) do
+      {:ok,
+       %{
+         root: absolute_root,
+         exit_status: exit_status,
+         timed_out: timed_out?,
+         output: truncate_task_output(output)
+       }}
+    end
+  end
+
+  def call("mix_compile", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, absolute_root} <- workspace_root(root),
+         {:ok, warnings_as_errors?} <- optional_boolean(args, "warnings_as_errors", false),
+         {:ok, timeout_ms} <- positive_integer_arg(args, "timeout_ms", 60_000),
+         compile_args <- build_compile_args(warnings_as_errors?),
+         {:ok, output, exit_status, timed_out?} <-
+           run_mix_task(absolute_root, "compile", compile_args, timeout_ms) do
+      {:ok,
+       %{
+         root: absolute_root,
+         warnings_as_errors: warnings_as_errors?,
+         exit_status: exit_status,
+         timed_out: timed_out?,
+         output: truncate_task_output(output)
+       }}
+    end
+  end
+
+  def call("editor_git_diff", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, absolute_root} <- workspace_root(root),
+         :ok <- ensure_git_repo(absolute_root),
+         {:ok, path_arg} <- optional_string(args, "path", nil),
+         {:ok, mode} <- optional_string(args, "mode", "all"),
+         :ok <- validate_diff_mode(mode),
+         {:ok, ref} <- optional_string(args, "ref", nil),
+         {:ok, ref2} <- optional_string(args, "ref2", nil),
+         :ok <- validate_diff_refs(mode, ref, ref2),
+         {:ok, absolute_path} <- maybe_resolve_path(absolute_root, path_arg),
+         {:ok, git_args} <- build_diff_args(mode, ref, ref2, absolute_path),
+         {:ok, output, exit_status} <- run_git(absolute_root, git_args) do
+      {:ok,
+       %{
+         root: absolute_root,
+         path: path_arg,
+         mode: mode,
+         ref: ref,
+         ref2: ref2,
+         exit_status: exit_status,
+         diff: truncate_git_output(output)
+       }}
+    end
+  end
+
+  def call("editor_git_diff_stat", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, absolute_root} <- workspace_root(root),
+         :ok <- ensure_git_repo(absolute_root),
+         {:ok, path_arg} <- optional_string(args, "path", nil),
+         {:ok, ref} <- optional_string(args, "ref", "HEAD"),
+         {:ok, absolute_path} <- maybe_resolve_path(absolute_root, path_arg),
+         {:ok, output, exit_status} <-
+           run_git(absolute_root, ["diff", "--stat", ref] ++ path_args(absolute_path)) do
+      {:ok,
+       %{
+         root: absolute_root,
+         path: path_arg,
+         ref: ref,
+         exit_status: exit_status,
+         stat: truncate_git_output(output)
+       }}
+    end
+  end
+
+  defp validate_diff_mode(mode) when mode in ["unstaged", "staged", "all", "commit", "between"],
+    do: :ok
+
+  defp validate_diff_mode(_mode),
+    do:
+      {:error,
+       %{
+         error: "invalid_diff_mode",
+         valid_modes: ["unstaged", "staged", "all", "commit", "between"]
+       }}
+
+  defp validate_diff_refs("commit", nil, _ref2),
+    do: {:error, %{error: "missing_ref", message: "commit mode requires 'ref' parameter"}}
+
+  defp validate_diff_refs("between", nil, _ref2),
+    do: {:error, %{error: "missing_ref", message: "between mode requires 'ref' parameter"}}
+
+  defp validate_diff_refs("between", _ref, nil),
+    do: {:error, %{error: "missing_ref2", message: "between mode requires 'ref2' parameter"}}
+
+  defp validate_diff_refs(_mode, _ref, _ref2), do: :ok
+
+  defp build_diff_args("unstaged", nil, nil, absolute_path) do
+    {:ok, ["diff"] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("staged", nil, nil, absolute_path) do
+    {:ok, ["diff", "--cached"] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("all", nil, nil, absolute_path) do
+    {:ok, ["diff", "HEAD"] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("commit", ref, nil, absolute_path) do
+    {:ok, ["show", ref] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("between", ref, ref2, absolute_path) do
+    {:ok, ["diff", ref, ref2] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args(_mode, _ref, _ref2, _absolute_path) do
+    {:error, %{error: "invalid_diff_args"}}
+  end
+
+  def call("editor_git_log", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, absolute_root} <- workspace_root(root),
+         :ok <- ensure_git_repo(absolute_root),
+         {:ok, path_arg} <- optional_string(args, "path", nil),
+         {:ok, limit} <- positive_integer_arg(args, "limit", 10),
+         {:ok, absolute_path} <- maybe_resolve_path(absolute_root, path_arg),
+         {:ok, output, exit_status} <-
+           run_git(absolute_root, ["log", "--oneline", "-#{limit}"] ++ path_args(absolute_path)) do
+      {:ok,
+       %{
+         root: absolute_root,
+         path: path_arg,
+         limit: limit,
+         exit_status: exit_status,
+         commits: parse_git_log(output)
+       }}
+    end
+  end
+
+  def call("editor_git_blame", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, path} <- required_string(args, "path"),
+         {:ok, start_line} <- positive_integer_arg(args, "start_line", 1),
+         {:ok, end_line} <- positive_integer_arg(args, "end_line", start_line),
+         :ok <- validate_line_range(start_line, end_line),
+         {:ok, absolute_root} <- workspace_root(root),
+         :ok <- ensure_git_repo(absolute_root),
+         {:ok, absolute_path} <- resolve_inside_root(absolute_root, path),
+         {:ok, output, exit_status} <-
+           run_git(absolute_root, [
+             "blame",
+             "-L",
+             "#{start_line},#{end_line}",
+             "--",
+             absolute_path
+           ]) do
+      {:ok,
+       %{
+         root: absolute_root,
+         path: Path.relative_to(absolute_path, absolute_root),
+         start_line: start_line,
+         end_line: end_line,
+         exit_status: exit_status,
+         blame: truncate_git_output(output)
+       }}
+    end
+  end
+
+  @spec call(tool_name(), tool_args()) :: tool_result()
   def call("editor_search_workspace", args) when is_map(args) do
     with {:ok, root} <- required_string(args, "root"),
          {:ok, query} <- required_string(args, "query"),
@@ -212,11 +606,14 @@ defmodule Llm.ToolRouter do
 
   def call("editor_list_files", args) when is_map(args) do
     with {:ok, root} <- required_string(args, "root"),
+         # Safety net: force real workspace root if placeholder detected
+         absolute_root <-
+           if(String.contains?(root, "path/to/your") or root == ".", do: File.cwd!(), else: root),
+         {:ok, absolute_root} <- workspace_root(absolute_root),
          {:ok, path} <- optional_string(args, "path", "."),
          {:ok, recursive?} <- optional_boolean(args, "recursive", true),
          {:ok, max_entries} <- positive_integer_arg(args, "max_entries", 200),
          {:ok, extensions} <- optional_extensions(args),
-         {:ok, absolute_root} <- workspace_root(root),
          {:ok, absolute_path} <- resolve_inside_root(absolute_root, path),
          {:ok, stat} <- file_stat(absolute_path),
          :ok <- directory?(stat),
@@ -240,6 +637,7 @@ defmodule Llm.ToolRouter do
   def call("editor_search_text", args) when is_map(args) do
     with {:ok, root} <- required_string(args, "root"),
          {:ok, query} <- required_string(args, "query"),
+         :ok <- reject_regex_query(query),
          {:ok, path} <- optional_string(args, "path", "."),
          {:ok, recursive?} <- optional_boolean(args, "recursive", true),
          {:ok, case_sensitive?} <- optional_boolean(args, "case_sensitive", false),
@@ -275,7 +673,6 @@ defmodule Llm.ToolRouter do
     end
   end
 
-  @spec call(tool_name(), tool_args()) :: tool_result()
   def call("echo_hello_world", args) when is_map(args) do
     {:ok,
      %{
@@ -307,12 +704,54 @@ defmodule Llm.ToolRouter do
     end
   end
 
+  def call("editor_write_file", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, path} <- required_string(args, "path"),
+         {:ok, content} <- required_string(args, "content"),
+         {:ok, absolute_root} <- workspace_root(root),
+         {:ok, absolute_path} <- resolve_inside_root(absolute_root, path) do
+      # Ensure the directory exists
+      File.mkdir_p!(Path.dirname(absolute_path))
+
+      case File.write(absolute_path, content) do
+        :ok ->
+          {:ok,
+           %{
+             path: Path.relative_to(absolute_path, absolute_root),
+             bytes_written: byte_size(content)
+           }}
+
+        {:error, reason} ->
+          {:error, %{error: "file_write_failed", reason: inspect(reason)}}
+      end
+    end
+  end
+
   def call(name, args) when is_binary(name) and is_map(args) do
     {:error,
      %{
        error: "unknown_tool",
        tool: name
      }}
+  end
+
+  # --- Private Helpers ---
+
+  defp reject_regex_query(query) when is_binary(query) do
+    if regex_like_query?(query) do
+      {:error,
+       %{
+         error: "regex_not_supported",
+         message:
+           "editor_search_text uses plain text matching only. For comments, line patterns, or regex-style inspection, use editor_read_file and inspect the returned file contents."
+       }}
+    else
+      :ok
+    end
+  end
+
+  defp regex_like_query?(query) do
+    String.contains?(query, ["^", "$", ".*", "\\d", "\\s", "\\w", "[", "]", "|"])
   end
 
   defp required_string(args, key) do
@@ -451,6 +890,9 @@ defmodule Llm.ToolRouter do
     value = Map.get(args, key) || Map.get(args, String.to_atom(key)) || default
 
     case value do
+      nil ->
+        {:ok, default}
+
       value when is_binary(value) ->
         value = String.trim(value)
 
@@ -793,5 +1235,281 @@ defmodule Llm.ToolRouter do
     line
     |> String.trim()
     |> String.slice(0, 240)
+  end
+
+  defp ensure_git_repo(root) do
+    git_dir = Path.join(root, ".git")
+
+    if File.dir?(git_dir) or File.regular?(git_dir) do
+      :ok
+    else
+      {:error, %{error: "not_a_git_repo", root: root}}
+    end
+  end
+
+  defp run_git(root, args) do
+    case System.cmd("git", args, cd: root, stderr_to_stdout: true) do
+      {output, 0} -> {:ok, output, 0}
+      {output, status} -> {:ok, output, status}
+    end
+  rescue
+    error -> {:error, %{error: "git_command_failed", reason: inspect(error)}}
+  end
+
+  defp maybe_resolve_path(_root, nil), do: {:ok, nil}
+  defp maybe_resolve_path(root, path), do: resolve_inside_root(root, path)
+
+  defp path_args(nil), do: []
+  defp path_args(path), do: ["--", path]
+
+  defp truncate_git_output(output) do
+    max_chars = 20_000
+
+    if String.length(output) > max_chars do
+      String.slice(output, 0, max_chars) <>
+        "\n\n[Git output truncated. #{String.length(output) - max_chars} characters omitted.]"
+    else
+      output
+    end
+  end
+
+  defp parse_git_log(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.map(fn line ->
+      case String.split(line, " ", parts: 2) do
+        [hash, message] -> %{hash: hash, message: message}
+        [hash] -> %{hash: hash, message: ""}
+        _ -> nil
+      end
+    end)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp validate_line_range(start_line, end_line)
+       when is_integer(start_line) and is_integer(end_line) and start_line > 0 and
+              end_line >= start_line do
+    :ok
+  end
+
+  defp validate_line_range(_start_line, _end_line) do
+    {:error, %{error: "invalid_line_range", message: "start_line must be > 0 and <= end_line"}}
+  end
+
+  defp optional_integer(args, key, default) do
+    value = Map.get(args, key) || Map.get(args, String.to_atom(key))
+
+    case value do
+      nil ->
+        {:ok, default}
+
+      value when is_integer(value) and value > 0 ->
+        {:ok, value}
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {parsed, ""} when parsed > 0 -> {:ok, parsed}
+          _ -> {:ok, default}
+        end
+
+      _ ->
+        {:ok, default}
+    end
+  end
+
+  defp build_test_args(_root, nil, nil) do
+    {:ok, []}
+  end
+
+  defp build_test_args(root, path, nil) do
+    with {:ok, absolute_path} <- resolve_inside_root(root, path),
+         true <-
+           String.ends_with?(absolute_path, "_test.exs") or
+             String.ends_with?(absolute_path, "_test.eex") or
+             {:error, %{error: "not_a_test_file", path: path}} do
+      {:ok, [absolute_path]}
+    end
+  end
+
+  defp build_test_args(root, path, line) when is_integer(line) and line > 0 do
+    with {:ok, absolute_path} <- resolve_inside_root(root, path) do
+      {:ok, ["#{absolute_path}:#{line}"]}
+    end
+  end
+
+  defp build_test_args(_root, _path, _line) do
+    {:error, %{error: "invalid_test_args", message: "line must be a positive integer"}}
+  end
+
+  defp build_compile_args(true), do: ["--warnings-as-errors"]
+  defp build_compile_args(false), do: []
+
+  defp run_mix_task(root, task_name, extra_args, timeout_ms) do
+    task =
+      Task.async(fn ->
+        System.cmd("mix", [task_name | extra_args], cd: root, stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, exit_status}} ->
+        {:ok, output, exit_status, false}
+
+      nil ->
+        {:ok, "mix #{task_name} timed out after #{timeout_ms}ms. The process was killed.", -1,
+         true}
+
+      {:exit, reason} ->
+        {:error, %{error: "task_crashed", task: task_name, reason: inspect(reason)}}
+    end
+  rescue
+    error ->
+      {:error, %{error: "mix_command_failed", task: task_name, reason: Exception.message(error)}}
+  end
+
+  defp truncate_task_output(output) do
+    max_chars = 30_000
+
+    if String.length(output) > max_chars do
+      String.slice(output, 0, max_chars) <>
+        "\n\n[Output truncated. #{String.length(output) - max_chars} characters omitted.]"
+    else
+      output
+    end
+  end
+
+  def call("editor_patch_file", args) when is_map(args) do
+    with {:ok, root} <- required_string(args, "root"),
+         {:ok, path} <- required_string(args, "path"),
+         {:ok, search} <- required_string(args, "search"),
+         {:ok, replace} <- required_string(args, "replace"),
+         {:ok, all?} <- optional_boolean(args, "all", false),
+         {:ok, absolute_root} <- workspace_root(root),
+         {:ok, absolute_path} <- resolve_inside_root(absolute_root, path),
+         {:ok, stat} <- file_stat(absolute_path),
+         :ok <- regular_file?(stat),
+         {:ok, original} <- File.read(absolute_path) do
+      cond do
+        String.contains?(original, search) ->
+          patched = apply_patch(original, search, replace, all?)
+
+          case File.write(absolute_path, patched) do
+            :ok ->
+              {:ok,
+               %{
+                 path: Path.relative_to(absolute_path, absolute_root),
+                 bytes_written: byte_size(patched),
+                 occurrences_replaced: count_replacements(original, search, all?),
+                 patched_content: truncate_patch_preview(patched)
+               }}
+
+            {:error, reason} ->
+              {:error, %{error: "file_write_failed", reason: inspect(reason)}}
+          end
+
+        true ->
+          # Try whitespace-normalized search as fallback
+          case find_normalized_match(original, search) do
+            {:ok, normalized_search} ->
+              patched = apply_patch(original, normalized_search, replace, all?)
+
+              case File.write(absolute_path, patched) do
+                :ok ->
+                  {:ok,
+                   %{
+                     path: Path.relative_to(absolute_path, absolute_root),
+                     bytes_written: byte_size(patched),
+                     occurrences_replaced: count_replacements(original, normalized_search, all?),
+                     note: "Search text was matched using whitespace normalization.",
+                     patched_content: truncate_patch_preview(patched)
+                   }}
+
+                {:error, reason} ->
+                  {:error, %{error: "file_write_failed", reason: inspect(reason)}}
+              end
+
+            :error ->
+              {:error,
+               %{
+                 error: "search_text_not_found",
+                 message:
+                   "The search text was not found in the file. Make sure it matches exactly, including whitespace and indentation.",
+                 search_preview: String.slice(search, 0, 200)
+               }}
+          end
+      end
+    end
+  end
+
+  # Private helpers for patching
+
+  defp apply_patch(original, search, replace, true) do
+    String.replace(original, search, replace)
+  end
+
+  defp apply_patch(original, search, replace, false) do
+    # Replace only first occurrence
+    case :binary.match(original, search) do
+      {pos, len} ->
+        <<before::binary-size(pos), _::binary-size(len), rest::binary>> = original
+        before <> replace <> rest
+
+      :nomatch ->
+        original
+    end
+  end
+
+  defp count_replacements(original, search, true) do
+    original
+    |> String.split(search)
+    |> length()
+    |> Kernel.-(1)
+    |> max(0)
+  end
+
+  defp count_replacements(original, search, false) do
+    case :binary.match(original, search) do
+      {_pos, _len} -> 1
+      :nomatch -> 0
+    end
+  end
+
+  defp truncate_patch_preview(content) do
+    max_chars = 5_000
+
+    if String.length(content) > max_chars do
+      String.slice(content, 0, max_chars) <>
+        "\n\n[Preview truncated. Full file written successfully.]"
+    else
+      content
+    end
+  end
+
+  defp find_normalized_match(original, search) do
+    # Normalize whitespace in both for comparison
+    normalize = fn s ->
+      s
+      |> String.replace(~r/\r\n/, "\n")
+      |> String.trim()
+    end
+
+    normalized_search = normalize.(search)
+
+    # Try to find a substring of original that matches when normalized
+    original
+    |> String.split("\n")
+    |> Enum.chunk_every(String.split(search, "\n") |> length(), 1, :discard)
+    |> Enum.find_value(fn chunk ->
+      candidate = Enum.join(chunk, "\n")
+
+      if normalize.(candidate) == normalized_search do
+        {:ok, candidate}
+      else
+        nil
+      end
+    end)
+    |> case do
+      {:ok, _} = match -> match
+      nil -> :error
+    end
   end
 end

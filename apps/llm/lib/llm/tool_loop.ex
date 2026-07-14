@@ -48,23 +48,56 @@ defmodule Llm.ToolLoop do
 
   defp do_run(messages, opts, round, max_rounds) when round >= max_rounds do
     Logger.warning("Max tool rounds reached; forcing final no-tool answer")
-
     finalize_from_context(messages, opts, max_rounds)
   end
 
   defp do_run(messages, opts, round, max_rounds) do
+    Logger.debug(
+      "ToolLoop round=#{round}/#{max_rounds} " <>
+        "tool_choice=#{inspect(Keyword.get(opts, :tool_choice))} " <>
+        "tools=#{length(Keyword.get(opts, :tools, []))} " <>
+        "messages=#{length(messages)}"
+    )
+
     case Llm.Client.chat_completion(messages, opts) do
       {:ok, %{tool_calls: [_ | _] = tool_calls} = completion} ->
         Logger.debug("Qwen requested #{length(tool_calls)} tool call(s)")
 
         with {:ok, next_messages} <- append_tool_results(messages, completion, tool_calls) do
-          do_run(next_messages, opts, round + 1, max_rounds)
+          do_run(next_messages, opts_after_tool_round(opts), round + 1, max_rounds)
         end
 
       {:ok, %{content: content} = completion} when is_binary(content) ->
-        case String.trim(content) do
-          "" -> {:ok, completion}
-          _ -> {:ok, content}
+        trimmed = String.trim(content)
+
+        if looks_like_tool_call_text?(trimmed) do
+          Logger.warning(
+            "Model returned tool-call-shaped text. Attempting to parse and execute..."
+          )
+
+          case parse_tool_call_from_text(trimmed) do
+            {:ok, tool_call} ->
+              # We parsed the JSON! Construct a fake completion so append_tool_results works
+              fake_completion = %{completion | tool_calls: [tool_call]}
+
+              with {:ok, next_messages} <-
+                     append_tool_results(messages, fake_completion, [tool_call]) do
+                do_run(next_messages, opts_after_tool_round(opts), round + 1, max_rounds)
+              end
+
+            :error ->
+              # Parsing failed, just return the text as a normal response
+              case trimmed do
+                "" -> {:ok, completion}
+                _ -> {:ok, content}
+              end
+          end
+        else
+          # Normal text response
+          case trimmed do
+            "" -> {:ok, completion}
+            _ -> {:ok, content}
+          end
         end
 
       {:ok, completion} ->
@@ -73,6 +106,75 @@ defmodule Llm.ToolLoop do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp parse_tool_call_from_text(content) do
+    content
+    |> String.split("\n")
+    |> Enum.find(fn line ->
+      String.contains?(line, "\"name\"") and String.contains?(line, "\"arguments\"")
+    end)
+    |> case do
+      nil ->
+        :error
+
+      line ->
+        case Regex.run(~r/\{.*\}/s, line) do
+          [match] ->
+            case Jason.decode(match) do
+              {:ok, decoded} ->
+                build_tool_call_from_parsed(decoded)
+
+              {:error, _reason} ->
+                fixed_json = fix_elixir_triple_quotes(match)
+
+                case Jason.decode(fixed_json) do
+                  {:ok, decoded} -> build_tool_call_from_parsed(decoded)
+                  {:error, _} -> :error
+                end
+            end
+
+          nil ->
+            :error
+        end
+    end
+  end
+
+  defp build_tool_call_from_parsed(decoded) do
+    with %{"name" => name, "arguments" => args} <- decoded do
+      {:ok,
+       %{
+         id: "text_call_#{System.unique_integer([:positive])}",
+         type: "function",
+         name: name,
+         arguments: args,
+         raw: decoded
+       }}
+    else
+      _ -> :error
+    end
+  end
+
+  defp fix_elixir_triple_quotes(json) do
+    # Replace Elixir """...""" with properly escaped JSON strings
+    # Pattern: : """ content """
+    Regex.replace(~r/:\s*"""(.*?)"""/s, json, fn _full, content ->
+      escaped =
+        content
+        |> String.trim()
+        |> String.replace("\\", "\\\\")
+        |> String.replace("\"", "\\\"")
+        |> String.replace("\n", "\\n")
+        |> String.replace("\r", "\\r")
+        |> String.replace("\t", "\\t")
+
+      ": \"#{escaped}\""
+    end)
+  end
+
+  defp looks_like_tool_call_text?(content) do
+    String.contains?(content, "\"name\"") and
+      String.contains?(content, "\"arguments\"")
   end
 
   defp append_tool_results(messages, completion, tool_calls) do
@@ -103,6 +205,8 @@ defmodule Llm.ToolLoop do
   end
 
   defp execute_tool_call(%{name: name, arguments: arguments}) do
+    Logger.debug("Executing tool #{name} with arguments=#{inspect(arguments)}")
+
     case Llm.ToolRouter.call(name, arguments) do
       {:ok, result} ->
         %{
@@ -130,6 +234,19 @@ defmodule Llm.ToolLoop do
 
   defp tool_result_message(result, tool_call) do
     Llm.Client.tool_result_message(tool_call, result)
+  end
+
+  defp opts_after_tool_round(opts) do
+    case Keyword.get(opts, :tool_choice) do
+      "required" ->
+        Keyword.put(opts, :tool_choice, "auto")
+
+      %{} ->
+        Keyword.put(opts, :tool_choice, "auto")
+
+      _ ->
+        opts
+    end
   end
 
   defp finalize_from_context(messages, opts, max_rounds) do

@@ -64,12 +64,18 @@ defmodule Llm do
   end
 
   def tool_chat(messages, opts) when is_list(messages) and is_list(opts) do
-    opts =
-      opts
-      |> Keyword.put_new(:max_tool_rounds, 4)
-      |> Keyword.put_new(:max_tokens, 1_024)
+    if enabled?() do
+      with :ok <- LlamaServer.ensure_running() do
+        opts =
+          opts
+          |> Keyword.put_new(:max_tool_rounds, 4)
+          |> Keyword.put_new(:max_tokens, 2_048)
 
-    Llm.ToolLoop.run(messages, opts)
+        Llm.ToolLoop.run(messages, opts)
+      end
+    else
+      {:error, :llm_disabled}
+    end
   end
 
   @spec agent_chat(String.t(), keyword()) :: chat_result()

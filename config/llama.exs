@@ -18,8 +18,8 @@ config :llm,
   # Keep this aligned with the llama-server --alias value.
   model_name: "local-model",
   # GGUF model used by this project.
-  model: "~/models/qwen2.5-7b-instruct-gguf/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-
+  # model: "~/models/qwen2.5-coder-7b-instruct-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+  model: "~/models/Qwen2.5-Coder-32B-Instruct-GGUF/qwen2.5-coder-32b-instruct-q4_k_m.gguf",
   # llama.cpp runtime.
   llama_dir: "~/llama.cpp",
   llama_server_path: "build/bin/llama-server",
@@ -29,12 +29,12 @@ config :llm,
   port: 8000,
 
   # llama-server model/runtime flags.
-  alias: "local-model",
+  alias: "qwen2.5-coder-32b-instruct",
   jinja: true,
   flash_attention: "on",
   gpu_layers: "auto",
   parallel_slots: 1,
-  context_size: 32_768,
+  context_size: 49_152,
   max_tokens: 8_192,
   batch_size: 2_048,
   micro_batch_size: 512,

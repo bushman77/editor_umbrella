@@ -1,21 +1,25 @@
+# apps/editor/lib/editor/workspaces.ex
 defmodule Editor.Workspaces do
   @moduledoc """
   Reads and resolves configured editor workspaces.
 
-  This module is intentionally pure/config-backed for now. It gives the web
-  layer a stable project identity instead of deriving the editor root from the
-  process current directory.
+  Workspaces are now database-backed git project records. A fallback
+  workspace pointing at the current directory is provided when no
+  projects have been registered yet.
   """
 
+  alias Editor.Repo
   alias Editor.Workspace
+  alias Editor.Workspaces.Project
+
+  import Ecto.Query
 
   @spec list() :: [Workspace.t()]
   def list do
-    :editor
-    |> Application.get_env(:workspaces, [])
-    |> normalize_configured_workspaces()
-    |> ensure_fallback_workspace()
-    |> Enum.uniq_by(& &1.id)
+    case Repo.all(from p in Project, order_by: p.name) do
+      [] -> fallback_workspaces()
+      projects -> Enum.map(projects, &project_to_workspace/1)
+    end
   end
 
   @spec default() :: Workspace.t()
@@ -28,11 +32,9 @@ defmodule Editor.Workspaces do
   def resolve(""), do: {:ok, default()}
 
   def resolve(id) when is_binary(id) do
-    normalized_id = normalize_id(id)
-
-    case Enum.find(list(), &(&1.id == normalized_id)) do
-      %Workspace{} = workspace -> {:ok, workspace}
+    case Repo.get(Project, id) do
       nil -> {:error, :not_found}
+      project -> {:ok, project_to_workspace(project)}
     end
   end
 
@@ -44,19 +46,49 @@ defmodule Editor.Workspaces do
     end
   end
 
-  defp normalize_configured_workspaces(configured) when is_list(configured) do
-    configured
-    |> Enum.flat_map(fn attrs ->
-      case Workspace.new(attrs) do
-        {:ok, workspace} -> [workspace]
-        {:error, _reason} -> []
-      end
-    end)
+  @spec list_projects() :: [Project.t()]
+  def list_projects do
+    Repo.all(from p in Project, order_by: p.name)
   end
 
-  defp normalize_configured_workspaces(_configured), do: []
+  @spec get_project(String.t() | pos_integer()) :: Project.t() | nil
+  def get_project(id) when is_binary(id) do
+    case Integer.parse(id) do
+      {int_id, ""} -> Repo.get(Project, int_id)
+      _ -> nil
+    end
+  end
 
-  defp ensure_fallback_workspace([]) do
+  def get_project(id) when is_integer(id), do: Repo.get(Project, id)
+
+  @spec create_project(map()) :: {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
+  def create_project(attrs) do
+    %Project{}
+    |> Project.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  @spec delete_project(String.t() | pos_integer()) ::
+          {:ok, Project.t()} | {:error, :not_found | term()}
+  def delete_project(id) do
+    case get_project(id) do
+      nil -> {:error, :not_found}
+      project -> Repo.delete(project)
+    end
+  end
+
+  defp project_to_workspace(%Project{} = project) do
+    {:ok, workspace} =
+      Workspace.new(%{
+        id: Integer.to_string(project.id),
+        name: project.name,
+        root: project.local_path
+      })
+
+    workspace
+  end
+
+  defp fallback_workspaces do
     [
       Workspace.new!(
         id: "current",
@@ -64,15 +96,5 @@ defmodule Editor.Workspaces do
         root: File.cwd!()
       )
     ]
-  end
-
-  defp ensure_fallback_workspace(workspaces), do: workspaces
-
-  defp normalize_id(id) do
-    id
-    |> String.trim()
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9_-]+/, "-")
-    |> String.trim("-")
   end
 end

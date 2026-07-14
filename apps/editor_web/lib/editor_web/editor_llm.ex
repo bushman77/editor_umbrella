@@ -65,8 +65,10 @@ defmodule EditorWeb.EditorLlm do
     :related_files,
     :related_file_context_overrides,
     :llm_conversation_id,
+    :llm_loading?,
     :cached_open_files,
-    :open_tabs
+    :open_tabs,
+    :cwd_git_status
   ]
 
   @spec assign_defaults(term(), String.t()) :: term()
@@ -170,33 +172,50 @@ defmodule EditorWeb.EditorLlm do
     selected_file = Map.get(assigns, :selected_file)
 
     system_message = """
-    You are a local editor assistant operating inside one workspace.
+    You are a local editor assistant. You MUST follow these rules exactly.
 
-    Tool-use rules:
-    - Use only the provided read-only editor tools.
-    - The workspace root is authoritative. Never operate outside it.
-    - If the user does not specify a path, search from ".".
-    - Do not use editor_read_file on a directory.
-    - Use editor_search_text to find candidate files.
-    - Use editor_list_files to discover project structure.
-    - Use editor_read_file only on a specific file path returned by search/list results or on the selected file.
-    - If the user asks to explain an implementation, search first, then read the most relevant file, then answer.
-    - Do not claim that something does not exist until you have searched from "." or from the user-specified path.
-    - Do not say "I will now search" after tool use. Either use a tool or answer from the results.
-    - Prefer concise answers with file paths, line numbers from search results, and clear reasoning.
-    - If the user asks to search but does not specify a path, use editor_search_workspace first.
-    - Use editor_search_text only when the user explicitly provides a directory or file path.
-    - If the user asks to explain an implementation, search first, then read the most relevant file, then answer.
-    - Do not conclude something does not exist after searching only a narrow guessed path.
-    - Do not use editor_read_file on a directory.
+    === ARCHITECTURAL LENS ===
+    #{Llm.ArchitecturalLens.format_for_prompt(cwd)}
+
+    === CODE QUALITY RULES ===
+    Every public function MUST have an accompanying @spec declaration.
+    - Public functions are `def`, `defmacro`, `defdelegate`.
+    - Private functions (`defp`, `defmacrop`) do not require specs.
+    - Behaviour callbacks (`handle_call/3`, `handle_cast/2`, `init/1`, etc.) are exempt.
+    - Specs must precede the function definition, after any @doc.
+    - If you modify an existing public function that lacks a spec, add one.
+    - If you generate new code, every public function must include a spec.
+
+    Example:
+    @doc "Inserts an hours entry."
+    @spec add_hours_entry(map()) :: :ok | {:ok, tuple()} | {:error, term()}
+    def add_hours_entry(attrs) when is_map(attrs) do
+      ...
+    end
+
+    === WORKSPACE ROOT (CRITICAL - NEVER IGNORE) ===
+    The ONLY valid workspace root is:
+    #{cwd}
+
+    EVERY tool call that requires a "root" parameter MUST use exactly this path.
+    NEVER use "/path/to/your/project", ".", "~", or any placeholder.
+    For any list/search operation, use root = "#{cwd}" and path = "." if none is specified.
+
+    #{git_context_section(assigns)}
+    #{related_context_section(assigns)}
+    === TOOL USE RULES ===
+    - Use only the provided editor tools.
+    - CHECK THE RELATED CONTEXT SECTION ABOVE FIRST. If the answer is there, use it directly without searching.
+    - Only use editor_search_workspace when the user explicitly asks to search OR when RELATED CONTEXT doesn't have what you need.
+    - If the user asks to "list files in the project" → immediately call editor_list_files with the root above.
+    - Do not guess paths.
+    - Be concise. Include file paths and line numbers when relevant.
+    #{intent_contract(question, selected_file)}
     """
 
     user_message = """
-    Workspace root:
-    #{cwd}
-
-    Selected file:
-    #{selected_file || "(none)"}
+    Current workspace root: #{cwd}
+    Selected file: #{selected_file || "(none)"}
 
     User question:
     #{question}
@@ -209,8 +228,10 @@ defmodule EditorWeb.EditorLlm do
 
     with {:ok, response} <-
            Llm.tool_chat(messages,
+             tools: editor_tools(),
+             tool_choice: tool_choice_for(question),
              max_tool_rounds: 6,
-             max_tokens: 1_024
+             max_tokens: 4_096
            ) do
       {:ok,
        %{
@@ -222,6 +243,95 @@ defmodule EditorWeb.EditorLlm do
          }
        }}
     end
+  end
+
+  defp git_context_section(%{
+         cwd_git_status: %{branch: branch, dirty?: dirty?, dirty_files: dirty_files}
+       }) do
+    dirty_summary =
+      if dirty? do
+        count = length(dirty_files)
+
+        file_list =
+          dirty_files
+          |> Enum.take(10)
+          |> Enum.map_join("\n", fn %{path: path, status: status} -> "  #{status} #{path}" end)
+
+        extra = if count > 10, do: "\n  ... and #{count - 10} more", else: ""
+
+        """
+        Uncommitted changes (#{count} files):
+        #{file_list}#{extra}
+        """
+      else
+        "Working tree is clean (no uncommitted changes)."
+      end
+
+    """
+    === GIT CONTEXT ===
+    - Current branch: #{branch}
+    - #{dirty_summary}
+    - Git tools are available: editor_git_diff, editor_git_diff_stat, editor_git_log, editor_git_blame
+    - Use git tools to inspect changes, history, or blame when relevant to the user's question.
+    """
+  end
+
+  defp git_context_section(_assigns), do: ""
+
+  defp intent_contract(question, selected_file) do
+    normalized = String.downcase(question)
+
+    cond do
+      review_question?(normalized) and is_binary(selected_file) ->
+        """
+        Review request contract:
+        - The user is asking you to review the current file: #{selected_file}.
+        - Do not ask which file to review.
+        - Read the file first if you haven't already.
+        - Lead with concrete findings, risks, or bugs. If none are visible, say that clearly.
+        - Do not summarize the file structure. Review it for correctness issues, risky runtime behavior, confusing structure, dead code, missing error handling, boundary problems, and maintainability concerns.
+        - If the full file is not present in context, read it with editor_read_file first.
+        """
+
+      refactor_question?(normalized) ->
+        """
+        Refactor output contract:
+        - Return only changed functions/docs or a unified diff.
+        - Do not return the whole module or whole file.
+        - Do not include module wrappers such as `defmodule ... do` or a final module `end`.
+        - Do not include placeholder comments such as `# ... other code ...`.
+        - If no safe code change is needed, respond exactly with: No code changes needed.
+        """
+
+      implementation_question?(normalized) ->
+        """
+        Implementation request contract:
+        - Distinguish existing code from proposed code.
+        - Before saying a function or module already exists, verify it appears in the provided context or read the file.
+        - Do not invent APIs that are not visible in the provided context.
+        - For PubSub/event wiring, identify the existing event producer and the existing subscriber/consumer.
+        - If showing code, show only the exact changed function/callback, capped at 60 lines total.
+        - Do not start a code block with `defmodule` unless creating a brand-new module.
+        """
+
+      true ->
+        ""
+    end
+  end
+
+  defp review_question?(question) do
+    Regex.match?(~r/\b(review|check|audit|look over)\b/, question)
+  end
+
+  defp refactor_question?(question) do
+    Enum.any?(~w(refactor rewrite clean up improve restructure), &String.contains?(question, &1))
+  end
+
+  defp implementation_question?(question) do
+    Regex.match?(
+      ~r/\b(how can|how do|implement|add|include|wire|connect|notify|broadcast|when|on join)\b/,
+      question
+    )
   end
 
   @spec handle_success(term(), String.t() | nil) :: term()
@@ -941,7 +1051,7 @@ defmodule EditorWeb.EditorLlm do
   end
 
   defp parse_response([line | rest], current_lines, segments, nil) do
-    case Regex.run(~r/^```([\w+-]*)\s*$/, line) do
+    case Regex.run(~r/^```([\w+-]*)\s*\$/, line) do
       [_, language] ->
         text = Enum.reverse(current_lines) |> Enum.join("\n")
 
@@ -1002,4 +1112,124 @@ defmodule EditorWeb.EditorLlm do
 
   defp pluralize(1, word), do: word
   defp pluralize(_count, word), do: word <> "s"
+
+  defp editor_tools do
+    Llm.ToolRouter.tools()
+    |> Enum.reject(fn tool ->
+      name = get_in(tool, [:function, :name]) || get_in(tool, ["function", "name"])
+      name == "echo_hello_world"
+    end)
+  end
+
+  defp tool_choice_for(question) do
+    q = String.downcase(question)
+
+    if String.contains?(q, [
+         "where is",
+         "find",
+         "search",
+         "show me the file",
+         "show me the code",
+         "read the file",
+         "open the file",
+         "list files",
+         "list all"
+       ]) do
+      "required"
+    else
+      "auto"
+    end
+  end
+
+  # apps/editor_web/lib/editor_web/editor_llm.ex
+
+  defp related_context_section(assigns) do
+    selected_file = Map.get(assigns, :selected_file)
+    related_files = related_files(assigns)
+    related_file_specs = related_file_specs(assigns)
+
+    cond do
+      is_nil(selected_file) ->
+        ""
+
+      related_files == [] ->
+        ""
+
+      true ->
+        specs_by_path = Map.new(related_file_specs, &{&1.path, &1})
+
+        strong_files =
+          related_files
+          |> Enum.filter(&strong_related_file?(selected_file, &1))
+
+        if strong_files == [] do
+          ""
+        else
+          grouped =
+            strong_files
+            |> Enum.map(fn path ->
+              spec = Map.get(specs_by_path, path, %{})
+              relationship = Map.get(spec, :relationship, "related")
+              functions = Map.get(spec, :functions, [])
+              {path, relationship, functions}
+            end)
+            |> Enum.group_by(&elem(&1, 1), &{elem(&1, 0), elem(&1, 2)})
+
+          uses_section =
+            format_relationship_group(grouped["uses"], "Dependencies (current file uses these)")
+
+          used_by_section =
+            format_relationship_group(
+              grouped["used by"],
+              "Consumers (these use the current file)"
+            )
+
+          bidirectional_section =
+            format_relationship_group(grouped["uses/used by"], "Bidirectional (tightly coupled)")
+
+          test_section = format_relationship_group(grouped["test/template"], "Tests & Templates")
+
+          sections =
+            [uses_section, used_by_section, bidirectional_section, test_section]
+            |> Enum.reject(&(&1 == ""))
+
+          if sections == [] do
+            ""
+          else
+            """
+            === RELATED CONTEXT (pre-discovered by editor) ===
+            Current file: #{selected_file}
+
+            #{Enum.join(sections, "\n\n")}
+
+            These files were discovered through AST analysis and cross-referencing.
+            You may read any of them with editor_read_file instead of searching.
+            Prioritize Dependencies and Consumers for understanding impact of changes.
+            """
+          end
+        end
+    end
+  end
+
+  defp format_relationship_group(nil, _label), do: ""
+
+  defp format_relationship_group(files, label) when is_list(files) do
+    entries =
+      files
+      |> Enum.take(8)
+      |> Enum.map(fn {path, functions} ->
+        func_text =
+          if functions != [] do
+            names = functions |> Enum.map(&Map.get(&1, :name, "?")) |> Enum.take(6)
+            " — calls: #{Enum.join(names, ", ")}"
+          else
+            ""
+          end
+
+        "  - #{path}#{func_text}"
+      end)
+      |> Enum.join("\n")
+
+    "#{label}:\n#{entries}"
+  end
 end
