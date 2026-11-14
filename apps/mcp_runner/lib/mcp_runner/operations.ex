@@ -6,11 +6,10 @@ defmodule McpRunner.Operations do
   argument vector is accepted. Mix commands are separately opted in.
   """
 
-  alias McpRunner.BoundedOutput
+  alias McpRunner.CommandRunner
   alias McpRunner.Policy
 
   @max_read_bytes 65_536
-  @max_output_bytes 30_000
   @max_list_entries 200
 
   @type result :: {:ok, map()} | {:error, String.t()}
@@ -85,15 +84,9 @@ defmodule McpRunner.Operations do
   @spec git_status() :: result()
   def git_status do
     with {:ok, root} <- Policy.root(),
-         {:ok, timeout} <- executable("timeout"),
-         {:ok, git} <- executable("git") do
-      {output, status} =
-        System.cmd(timeout, ["--signal=TERM", "--kill-after=5s", "10s", git, "status", "--short", "--branch"],
-          cd: root, stderr_to_stdout: true, into: BoundedOutput.new(@max_output_bytes))
-      {:ok, %{exit_status: status, output: BoundedOutput.text(output)}}
+         {:ok, result} <- CommandRunner.run("git", ["status", "--short", "--branch"], root, 10) do
+      {:ok, result}
     end
-  rescue
-    error -> {:error, "Git status failed: #{Exception.message(error)}"}
   end
 
   @spec compile() :: result()
@@ -122,27 +115,8 @@ defmodule McpRunner.Operations do
     with true <- Policy.execution_allowed?() or {:error, "Mix execution is disabled; set EDITOR_MCP_ALLOW_EXECUTION=1 locally"},
          {:ok, root} <- Policy.root(),
          true <- File.regular?(Path.join(root, "mix.exs")) or {:error, "Workspace is not a Mix project"},
-         {:ok, timeout} <- executable("timeout"),
-         {:ok, mix} <- executable("mix") do
-      {output, status} =
-        System.cmd(
-          timeout,
-          ["--signal=TERM", "--kill-after=5s", "#{seconds}s", mix, task | args],
-          cd: root,
-          stderr_to_stdout: true,
-          into: BoundedOutput.new(@max_output_bytes)
-        )
-
-      {:ok, %{command: "mix #{task}", arguments: args, exit_status: status, timed_out: status == 124, output: BoundedOutput.text(output)}}
-    end
-  rescue
-    error -> {:error, "Mix command failed: #{Exception.message(error)}"}
-  end
-
-  defp executable(name) do
-    case System.find_executable(name) do
-      nil -> {:error, "Required executable not found: #{name}"}
-      path -> {:ok, path}
+         {:ok, result} <- CommandRunner.run("mix", [task | args], root, seconds) do
+      {:ok, Map.merge(result, %{command: "mix #{task}", arguments: args})}
     end
   end
 

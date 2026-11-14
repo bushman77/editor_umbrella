@@ -62,6 +62,14 @@ request argument. The development commands use the fixed executables `mix`
 and GNU `timeout`, with per-command limits (60 seconds compile, 120 seconds tests).
 No executable or shell string can be selected by the MCP client.
 
+The command runner uses GNU `timeout` in its default process-group mode (not
+`--foreground`). On expiry it sends TERM to the command's process group and
+sends KILL after a five-second grace period. Exit statuses 124 and 137 are
+reported as possible timeouts; a command can also return those codes itself,
+so this is not proof of why it exited. Processes that deliberately detach into
+a different process group are not covered. This is not a sandbox, and a command
+may keep running until its timeout if its MCP caller disconnects unexpectedly.
+
 In a real MCP client configuration, launch this process as a STDIO command with
 `cwd` set to `~/editor_umbrella/apps/mcp_runner` and the above environment.
 Prepare dependencies and compile once before connecting. When
