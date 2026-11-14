@@ -2165,7 +2165,7 @@ defmodule EditorWeb.EditorLive do
           socket
           |> assign(:cwd, workspace.root)
           |> assign(:workspace_root, workspace.root)
-          |> assign(:entries, EditorWorkspace.load_entries(workspace.root, workspace.root))
+          |> assign(:entries, Workspace.load_entries(workspace.root, workspace.root))
           |> clear_editor()
           |> reset_llm_conversation(workspace.root)
           |> maybe_fetch_git_status(workspace.root)
