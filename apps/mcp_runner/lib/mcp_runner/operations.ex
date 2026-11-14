@@ -6,6 +6,7 @@ defmodule McpRunner.Operations do
   argument vector is accepted. Mix commands are separately opted in.
   """
 
+  alias McpRunner.BoundedOutput
   alias McpRunner.Policy
 
   @max_read_bytes 65_536
@@ -88,8 +89,8 @@ defmodule McpRunner.Operations do
          {:ok, git} <- executable("git") do
       {output, status} =
         System.cmd(timeout, ["--signal=TERM", "--kill-after=5s", "10s", git, "status", "--short", "--branch"],
-          cd: root, stderr_to_stdout: true)
-      {:ok, %{exit_status: status, output: truncate(output)}}
+          cd: root, stderr_to_stdout: true, into: BoundedOutput.new(@max_output_bytes))
+      {:ok, %{exit_status: status, output: BoundedOutput.text(output)}}
     end
   rescue
     error -> {:error, "Git status failed: #{Exception.message(error)}"}
@@ -128,10 +129,11 @@ defmodule McpRunner.Operations do
           timeout,
           ["--signal=TERM", "--kill-after=5s", "#{seconds}s", mix, task | args],
           cd: root,
-          stderr_to_stdout: true
+          stderr_to_stdout: true,
+          into: BoundedOutput.new(@max_output_bytes)
         )
 
-      {:ok, %{command: "mix #{task}", exit_status: status, timed_out: status == 124, output: truncate(output)}}
+      {:ok, %{command: "mix #{task}", arguments: args, exit_status: status, timed_out: status == 124, output: BoundedOutput.text(output)}}
     end
   rescue
     error -> {:error, "Mix command failed: #{Exception.message(error)}"}
@@ -143,12 +145,6 @@ defmodule McpRunner.Operations do
       path -> {:ok, path}
     end
   end
-
-  defp truncate(output) when byte_size(output) > @max_output_bytes do
-    binary_part(output, 0, @max_output_bytes) <> "\n[Output truncated]"
-  end
-
-  defp truncate(output), do: output
 
   defp type_to_kind(:regular), do: :file
   defp type_to_kind(:directory), do: :directory
