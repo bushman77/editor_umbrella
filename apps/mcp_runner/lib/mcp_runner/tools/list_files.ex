@@ -10,6 +10,7 @@ defmodule McpRunner.Tools.ListFiles do
   end
 
   @impl true
+  @spec execute(map(), term()) :: {:reply, term(), term()}
   def execute(params, frame) do
     result = McpRunner.Operations.list_files(Map.get(params, :path, "."))
 

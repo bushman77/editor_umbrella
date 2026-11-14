@@ -10,6 +10,7 @@ defmodule McpRunner.Tools.ReadFile do
   end
 
   @impl true
+  @spec execute(map(), term()) :: {:reply, term(), term()}
   def execute(%{path: path}, frame) do
     result = McpRunner.Operations.read_file(path)
     {:reply, to_response(result), frame}

@@ -10,6 +10,7 @@ defmodule McpRunner.Tools.GitStatus do
   end
 
   @impl true
+  @spec execute(map(), term()) :: {:reply, term(), term()}
   def execute(_params, frame) do
     response =
       case McpRunner.Operations.git_status() do

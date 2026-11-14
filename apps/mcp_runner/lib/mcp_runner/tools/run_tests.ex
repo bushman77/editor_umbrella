@@ -10,6 +10,7 @@ defmodule McpRunner.Tools.RunTests do
   end
 
   @impl true
+  @spec execute(map(), term()) :: {:reply, term(), term()}
   def execute(params, frame) do
     response =
       case McpRunner.Operations.run_tests(Map.get(params, :path)) do

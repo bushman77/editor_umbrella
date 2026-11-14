@@ -16,6 +16,7 @@ defmodule McpRunner.BoundedOutput do
   end
 
   @doc false
+  @spec append(t(), binary()) :: t()
   def append(%__MODULE__{truncated: true} = state, _chunk), do: state
 
   def append(%__MODULE__{data: data, limit: limit} = state, chunk) when is_binary(chunk) do
@@ -36,6 +37,7 @@ defmodule McpRunner.BoundedOutput do
 end
 
 defimpl Collectable, for: McpRunner.BoundedOutput do
+  @spec into(McpRunner.BoundedOutput.t()) :: {McpRunner.BoundedOutput.t(), function()}
   def into(initial) do
     {initial,
      fn

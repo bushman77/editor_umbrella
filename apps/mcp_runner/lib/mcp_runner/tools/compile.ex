@@ -10,6 +10,7 @@ defmodule McpRunner.Tools.Compile do
   end
 
   @impl true
+  @spec execute(map(), term()) :: {:reply, term(), term()}
   def execute(_params, frame) do
     response =
       case McpRunner.Operations.compile() do
