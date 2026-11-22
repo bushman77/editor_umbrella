@@ -7,6 +7,11 @@ defmodule EditorWeb.EditorLlm do
   @llm_open_file_total_max_chars 48_000
   @tool_chat_max_tokens 4_096
 
+  # Conversation history replayed into each request: the last few turns
+  # (question + answer each), within a character cap.
+  @history_recent_messages 12
+  @history_max_chars 12_000
+
   # Questions containing any of these force a tool call on the first round.
   # ToolLoop drops back to "auto" after that round.
   @tool_required_phrases [
@@ -182,13 +187,21 @@ defmodule EditorWeb.EditorLlm do
     - Do not guess paths.
     - If a tool returns an error, say which tool failed and why. Never answer from guesses or invent modules, files or functions to cover a failed or missing lookup.
     - Be concise. Include file paths and line numbers when relevant.
+
+    === CONVERSATION HISTORY ===
+    Earlier questions and your earlier answers from this conversation come before the current request.
+    - Use them to resolve references such as "that", "it", "the function you mentioned" or "do the same for X".
+    - Code in your earlier answers may be wrong or out of date. Re-read the file with editor_read_file before relying on it or patching it.
+    - Answer the current request. Do not repeat earlier answers unless asked.
     """
 
     # Everything that changes between requests (git status, related files,
-    # open buffers, the question) lives in the user message. The system
-    # message and the tool schemas rendered after it then stay byte-identical,
-    # so llama-server's prompt cache can reuse them instead of re-reading
-    # thousands of tokens on every question.
+    # open buffers, the question) lives in the last user message. The system
+    # message and the tool schemas rendered after it stay byte-identical, and
+    # history only grows at the end, so llama-server's prompt cache can reuse
+    # the shared prefix instead of re-reading thousands of tokens.
+    history = history_messages(assigns)
+    history_chars = Llm.ConversationHistory.char_count(history)
     buffer_context = editor_buffer_context() || ""
 
     user_message = """
@@ -198,16 +211,16 @@ defmodule EditorWeb.EditorLlm do
     #{git_context_section(assigns)}
     #{related_context_section(assigns)}
     #{buffer_context}
-    #{retrieved_snippets_section(cwd, selected_file, question, buffer_context)}
+    #{retrieved_snippets_section(cwd, selected_file, question, buffer_context, history_chars)}
     #{intent_contract(question, selected_file)}
     User question:
     #{question}
     """
 
-    messages = [
-      %{role: "system", content: system_message},
-      %{role: "user", content: user_message}
-    ]
+    messages =
+      [%{role: "system", content: system_message}] ++
+        history ++
+        [%{role: "user", content: user_message}]
 
     with {:ok, response} <-
            Llm.tool_chat(messages,
@@ -329,10 +342,12 @@ defmodule EditorWeb.EditorLlm do
 
     snapshot =
       if pending_question != "" do
+        # ToolLoop returns the raw completion map when the model's final
+        # message is empty; record_turn only takes text, so store no answer.
         Llm.Conversation.record_turn(
           socket.assigns.llm_conversation_id,
           pending_question,
-          response,
+          if(is_binary(response), do: response),
           socket.assigns.cwd
           |> conversation_attrs(socket.assigns.selected_file)
           |> Map.put(:store_assistant?, true)
@@ -566,6 +581,25 @@ defmodule EditorWeb.EditorLlm do
     conversation_id
   end
 
+  # Earlier turns of this conversation (questions and final answers), oldest
+  # first. Capped at an eighth of the prompt budget so open buffers, retrieved
+  # snippets and tool results keep most of the window. History must never
+  # block a request, so any failure just means no history.
+  defp history_messages(%{llm_conversation_id: conversation_id})
+       when is_binary(conversation_id) do
+    budget = Llm.Budget.prompt_char_budget(max_tokens: @tool_chat_max_tokens)
+
+    conversation_id
+    |> Llm.Conversation.recent_messages(@history_recent_messages, include_assistant?: true)
+    |> Llm.ConversationHistory.prompt_messages(max_chars: min(@history_max_chars, div(budget, 8)))
+  rescue
+    _error -> []
+  catch
+    :exit, _reason -> []
+  end
+
+  defp history_messages(_assigns), do: []
+
   defp conversation_attrs(cwd, selected_file) do
     %{
       project_id: cwd,
@@ -695,10 +729,10 @@ defmodule EditorWeb.EditorLlm do
   # so the model often needs no tool round at all. Gets the room left after
   # open buffers, capped at a third of the budget so tool results still fit.
   # Retrieval failures never block the request.
-  defp retrieved_snippets_section(cwd, selected_file, question, buffer_context) do
+  defp retrieved_snippets_section(cwd, selected_file, question, buffer_context, history_chars) do
     budget = Llm.Budget.prompt_char_budget(max_tokens: @tool_chat_max_tokens)
     third = div(budget, 3)
-    max_chars = min(third, budget - third - String.length(buffer_context))
+    max_chars = min(third, budget - third - String.length(buffer_context) - history_chars)
 
     with true <- max_chars >= 1_500,
          {:ok, text} when text != "" <-
