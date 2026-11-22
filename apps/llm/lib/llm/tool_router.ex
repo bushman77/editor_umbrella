@@ -473,52 +473,6 @@ defmodule Llm.ToolRouter do
     end
   end
 
-  defp validate_diff_mode(mode) when mode in ["unstaged", "staged", "all", "commit", "between"],
-    do: :ok
-
-  defp validate_diff_mode(_mode),
-    do:
-      {:error,
-       %{
-         error: "invalid_diff_mode",
-         valid_modes: ["unstaged", "staged", "all", "commit", "between"]
-       }}
-
-  defp validate_diff_refs("commit", nil, _ref2),
-    do: {:error, %{error: "missing_ref", message: "commit mode requires 'ref' parameter"}}
-
-  defp validate_diff_refs("between", nil, _ref2),
-    do: {:error, %{error: "missing_ref", message: "between mode requires 'ref' parameter"}}
-
-  defp validate_diff_refs("between", _ref, nil),
-    do: {:error, %{error: "missing_ref2", message: "between mode requires 'ref2' parameter"}}
-
-  defp validate_diff_refs(_mode, _ref, _ref2), do: :ok
-
-  defp build_diff_args("unstaged", nil, nil, absolute_path) do
-    {:ok, ["diff"] ++ path_args(absolute_path)}
-  end
-
-  defp build_diff_args("staged", nil, nil, absolute_path) do
-    {:ok, ["diff", "--cached"] ++ path_args(absolute_path)}
-  end
-
-  defp build_diff_args("all", nil, nil, absolute_path) do
-    {:ok, ["diff", "HEAD"] ++ path_args(absolute_path)}
-  end
-
-  defp build_diff_args("commit", ref, nil, absolute_path) do
-    {:ok, ["show", ref] ++ path_args(absolute_path)}
-  end
-
-  defp build_diff_args("between", ref, ref2, absolute_path) do
-    {:ok, ["diff", ref, ref2] ++ path_args(absolute_path)}
-  end
-
-  defp build_diff_args(_mode, _ref, _ref2, _absolute_path) do
-    {:error, %{error: "invalid_diff_args"}}
-  end
-
   def call("editor_git_log", args) when is_map(args) do
     with {:ok, root} <- required_string(args, "root"),
          {:ok, absolute_root} <- workspace_root(root),
@@ -812,8 +766,9 @@ defmodule Llm.ToolRouter do
           true ->
             with :ok <- reject_symlink_components(trusted_root),
                  :ok <- reject_symlink_components(absolute_root),
-                 true <- File.dir?(absolute_root) or
-                           {:error, %{error: "workspace_root_not_found", root: absolute_root}} do
+                 true <-
+                   File.dir?(absolute_root) or
+                     {:error, %{error: "workspace_root_not_found", root: absolute_root}} do
               {:ok, absolute_root}
             end
         end
@@ -868,7 +823,8 @@ defmodule Llm.ToolRouter do
           {:cont, {:ok, candidate}}
 
         {:error, reason} ->
-          {:halt, {:error, %{error: "path_check_failed", path: candidate, reason: inspect(reason)}}}
+          {:halt,
+           {:error, %{error: "path_check_failed", path: candidate, reason: inspect(reason)}}}
       end
     end)
     |> case do
@@ -1566,5 +1522,51 @@ defmodule Llm.ToolRouter do
       {:ok, _} = match -> match
       nil -> :error
     end
+  end
+
+  defp validate_diff_mode(mode) when mode in ["unstaged", "staged", "all", "commit", "between"],
+    do: :ok
+
+  defp validate_diff_mode(_mode),
+    do:
+      {:error,
+       %{
+         error: "invalid_diff_mode",
+         valid_modes: ["unstaged", "staged", "all", "commit", "between"]
+       }}
+
+  defp validate_diff_refs("commit", nil, _ref2),
+    do: {:error, %{error: "missing_ref", message: "commit mode requires 'ref' parameter"}}
+
+  defp validate_diff_refs("between", nil, _ref2),
+    do: {:error, %{error: "missing_ref", message: "between mode requires 'ref' parameter"}}
+
+  defp validate_diff_refs("between", _ref, nil),
+    do: {:error, %{error: "missing_ref2", message: "between mode requires 'ref2' parameter"}}
+
+  defp validate_diff_refs(_mode, _ref, _ref2), do: :ok
+
+  defp build_diff_args("unstaged", nil, nil, absolute_path) do
+    {:ok, ["diff"] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("staged", nil, nil, absolute_path) do
+    {:ok, ["diff", "--cached"] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("all", nil, nil, absolute_path) do
+    {:ok, ["diff", "HEAD"] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("commit", ref, nil, absolute_path) do
+    {:ok, ["show", ref] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args("between", ref, ref2, absolute_path) do
+    {:ok, ["diff", ref, ref2] ++ path_args(absolute_path)}
+  end
+
+  defp build_diff_args(_mode, _ref, _ref2, _absolute_path) do
+    {:error, %{error: "invalid_diff_args"}}
   end
 end

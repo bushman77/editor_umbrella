@@ -127,6 +127,39 @@ defmodule LlmTest do
     assert option_value(args, "--min-p") == "0.0"
   end
 
+  test "llama server args and request defaults read the profile sampling list" do
+    keys = [:sampling, :temperature, :top_p, :top_k, :min_p, :presence_penalty, :extra_args]
+    original_env = Map.new(keys, fn key -> {key, Application.fetch_env(:llm, key)} end)
+
+    on_exit(fn ->
+      Enum.each(original_env, fn
+        {key, {:ok, value}} -> Application.put_env(:llm, key, value)
+        {key, :error} -> Application.delete_env(:llm, key)
+      end)
+    end)
+
+    Enum.each([:temperature, :top_p, :top_k, :min_p, :presence_penalty], fn key ->
+      Application.delete_env(:llm, key)
+    end)
+
+    Application.put_env(:llm, :sampling, temperature: 0.6, top_p: 0.95, top_k: 40)
+    Application.put_env(:llm, :extra_args, ["--n-cpu-moe", "30"])
+
+    args = Llm.LlamaServer.server_args()
+
+    assert option_value(args, "--temp") == "0.6"
+    assert option_value(args, "--top-p") == "0.95"
+    assert option_value(args, "--top-k") == "40"
+    refute "--min-p" in args
+    assert Enum.take(args, -2) == ["--n-cpu-moe", "30"]
+
+    # A flat key still wins over the profile list.
+    Application.put_env(:llm, :temperature, 0.2)
+    assert Llm.Sampling.value(:temperature) == 0.2
+    assert Llm.Sampling.value(:top_k) == 40
+    assert Llm.Sampling.value(:min_p) == nil
+  end
+
   test "conversation lists snapshots for a project newest first" do
     ensure_conversation_started()
 

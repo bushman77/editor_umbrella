@@ -70,10 +70,28 @@ defmodule Llm.Client do
         {:ok, body}
 
       %{status: status, body: body} ->
-        {:error, {:http_error, status, body}}
+        http_error(status, body)
     end
   rescue
     error -> {:error, error}
+  end
+
+  # llama-server rejects prompts that do not fit --ctx-size with a 400. Give
+  # callers a distinct reason so the UI can say what actually went wrong.
+  defp http_error(status, %{"error" => %{} = error} = body) do
+    if context_overflow?(error) do
+      {:error, {:context_overflow, Map.get(error, "message")}}
+    else
+      {:error, {:http_error, status, body}}
+    end
+  end
+
+  defp http_error(status, body), do: {:error, {:http_error, status, body}}
+
+  defp context_overflow?(error) do
+    Map.get(error, "type") == "exceed_context_size_error" or
+      (is_binary(Map.get(error, "message")) and
+         String.contains?(Map.get(error, "message"), "context size"))
   end
 
   @spec complete(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
@@ -139,8 +157,13 @@ defmodule Llm.Client do
 
   defp body_option(opts, key) do
     case Keyword.fetch(opts, key) do
-      {:ok, value} -> value
-      :error -> Application.get_env(:llm, key)
+      {:ok, value} ->
+        value
+
+      :error ->
+        if key in Llm.Sampling.keys(),
+          do: Llm.Sampling.value(key),
+          else: Application.get_env(:llm, key)
     end
   end
 
@@ -232,6 +255,9 @@ defmodule Llm.Client do
            raw: body
          }}
 
+      reasoning_only?(message) ->
+        {:error, {:reasoning_only, finish_reason}}
+
       true ->
         response_error(body)
     end
@@ -271,6 +297,8 @@ defmodule Llm.Client do
 
   defp finish_reason(_body), do: nil
 
+  # Reasoning that leaked into content (`<think>...</think>`) is removed here
+  # so no caller ever shows it or treats it as the answer.
   defp chat_content(body) when is_map(body) do
     [
       get_in(body, ["choices", Access.at(0), "message", "content"]),
@@ -279,10 +307,18 @@ defmodule Llm.Client do
       Map.get(body, "content"),
       Map.get(body, "response")
     ]
-    |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&Llm.ModelOutput.strip_reasoning/1)
+    |> Enum.find(&(&1 != ""))
   end
 
   defp chat_content(_body), do: nil
+
+  # The model spent its whole output budget thinking and produced no answer.
+  defp reasoning_only?(%{"reasoning_content" => reasoning}) when is_binary(reasoning),
+    do: String.trim(reasoning) != ""
+
+  defp reasoning_only?(_message), do: false
 
   defp tool_calls(body) when is_map(body) do
     body

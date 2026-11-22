@@ -19,7 +19,6 @@ defmodule Llm.ToolLoop do
 
   @default_max_rounds 4
   @default_max_tokens 1_024
-  @default_chat_option_keys [:temperature, :top_p, :top_k, :min_p, :presence_penalty]
 
   @type message :: map()
   @type run_result ::
@@ -42,10 +41,10 @@ defmodule Llm.ToolLoop do
   end
 
   defp put_llm_chat_defaults(opts) do
-    Enum.reduce(@default_chat_option_keys, opts, fn key, acc ->
-      case Application.fetch_env(:llm, key) do
-        {:ok, value} -> Keyword.put_new(acc, key, value)
-        :error -> acc
+    Enum.reduce(Llm.Sampling.keys(), opts, fn key, acc ->
+      case Llm.Sampling.value(key) do
+        nil -> acc
+        value -> Keyword.put_new(acc, key, value)
       end
     end)
   end
@@ -77,37 +76,7 @@ defmodule Llm.ToolLoop do
         end
 
       {:ok, %{content: content} = completion} when is_binary(content) ->
-        trimmed = String.trim(content)
-
-        if looks_like_tool_call_text?(trimmed) do
-          Logger.warning(
-            "Model returned tool-call-shaped text. Attempting to parse and execute..."
-          )
-
-          case parse_tool_call_from_text(trimmed) do
-            {:ok, tool_call} ->
-              # We parsed the JSON! Construct a fake completion so append_tool_results works
-              fake_completion = %{completion | tool_calls: [tool_call]}
-
-              with {:ok, next_messages} <-
-                     append_tool_results(messages, fake_completion, [tool_call]) do
-                do_run(next_messages, opts_after_tool_round(opts), round + 1, max_rounds)
-              end
-
-            :error ->
-              # Parsing failed, just return the text as a normal response
-              case trimmed do
-                "" -> {:ok, completion}
-                _ -> {:ok, content}
-              end
-          end
-        else
-          # Normal text response
-          case trimmed do
-            "" -> {:ok, completion}
-            _ -> {:ok, content}
-          end
-        end
+        handle_text_completion(messages, completion, content, opts, round, max_rounds)
 
       {:ok, completion} ->
         {:ok, completion}
@@ -117,73 +86,28 @@ defmodule Llm.ToolLoop do
     end
   end
 
-  defp parse_tool_call_from_text(content) do
-    content
-    |> String.split("\n")
-    |> Enum.find(fn line ->
-      String.contains?(line, "\"name\"") and String.contains?(line, "\"arguments\"")
-    end)
-    |> case do
-      nil ->
-        :error
+  # The server returned text. It may be a final answer, or a tool call that
+  # llama.cpp failed to parse (more common with low-bit quants).
+  defp handle_text_completion(messages, completion, content, opts, round, max_rounds) do
+    with true <- Llm.ModelOutput.tool_call_text?(content),
+         {:ok, tool_calls} <- Llm.ModelOutput.parse_tool_calls(content) do
+      Logger.warning("Model wrote #{length(tool_calls)} tool call(s) as text; executing them")
 
-      line ->
-        case Regex.run(~r/\{.*\}/s, line) do
-          [match] ->
-            case Jason.decode(match) do
-              {:ok, decoded} ->
-                build_tool_call_from_parsed(decoded)
+      text_completion = %{completion | message: nil, tool_calls: tool_calls}
 
-              {:error, _reason} ->
-                fixed_json = fix_elixir_triple_quotes(match)
-
-                case Jason.decode(fixed_json) do
-                  {:ok, decoded} -> build_tool_call_from_parsed(decoded)
-                  {:error, _} -> :error
-                end
-            end
-
-          nil ->
-            :error
-        end
-    end
-  end
-
-  defp build_tool_call_from_parsed(decoded) do
-    with %{"name" => name, "arguments" => args} <- decoded do
-      {:ok,
-       %{
-         id: "text_call_#{System.unique_integer([:positive])}",
-         type: "function",
-         name: name,
-         arguments: args,
-         raw: decoded
-       }}
+      with {:ok, next_messages} <- append_tool_results(messages, text_completion, tool_calls) do
+        do_run(next_messages, opts_after_tool_round(opts), round + 1, max_rounds)
+      end
     else
-      _ -> :error
+      _not_a_tool_call -> final_answer(completion, content)
     end
   end
 
-  defp fix_elixir_triple_quotes(json) do
-    # Replace Elixir """...""" with properly escaped JSON strings
-    # Pattern: : """ content """
-    Regex.replace(~r/:\s*"""(.*?)"""/s, json, fn _full, content ->
-      escaped =
-        content
-        |> String.trim()
-        |> String.replace("\\", "\\\\")
-        |> String.replace("\"", "\\\"")
-        |> String.replace("\n", "\\n")
-        |> String.replace("\r", "\\r")
-        |> String.replace("\t", "\\t")
-
-      ": \"#{escaped}\""
-    end)
-  end
-
-  defp looks_like_tool_call_text?(content) do
-    String.contains?(content, "\"name\"") and
-      String.contains?(content, "\"arguments\"")
+  defp final_answer(completion, content) do
+    case Llm.ModelOutput.strip_reasoning(content) do
+      "" -> {:ok, completion}
+      visible -> {:ok, visible}
+    end
   end
 
   defp append_tool_results(messages, completion, tool_calls) do
@@ -201,8 +125,12 @@ defmodule Llm.ToolLoop do
     error -> {:error, error}
   end
 
+  # Reasoning is never replayed: it burns context and the template re-adds
+  # nothing useful from it on the next turn.
   defp assistant_message_for_completion(%{message: message}) when is_map(message) do
     message
+    |> Map.drop(["reasoning_content", :reasoning_content])
+    |> Map.update("content", nil, &strip_replayed_content/1)
   end
 
   defp assistant_message_for_completion(%{tool_calls: tool_calls}) do
@@ -212,6 +140,11 @@ defmodule Llm.ToolLoop do
       tool_calls: Enum.map(tool_calls, & &1.raw)
     }
   end
+
+  defp strip_replayed_content(content) when is_binary(content),
+    do: Llm.ModelOutput.strip_reasoning(content)
+
+  defp strip_replayed_content(content), do: content
 
   defp execute_tool_call(%{name: name, arguments: arguments}) do
     Logger.debug("Executing tool #{name} with arguments=#{inspect(arguments)}")
@@ -241,8 +174,12 @@ defmodule Llm.ToolLoop do
       }
   end
 
+  # Tool results are capped so one large file read cannot overflow the
+  # model's context window (editor_read_file allows up to 200 KB).
   defp tool_result_message(result, tool_call) do
-    Llm.Client.tool_result_message(tool_call, result)
+    tool_call
+    |> Llm.Client.tool_result_message(result)
+    |> Map.update!(:content, &Llm.Budget.truncate(&1, Llm.Budget.tool_result_char_limit()))
   end
 
   defp opts_after_tool_round(opts) do
@@ -281,8 +218,8 @@ defmodule Llm.ToolLoop do
       |> Keyword.put(:max_tokens, Keyword.get(opts, :max_tokens, 1_024))
 
     case Llm.Client.chat_completion(final_messages, final_opts) do
-      {:ok, %{content: content}} when is_binary(content) ->
-        {:ok, content}
+      {:ok, %{content: content} = completion} when is_binary(content) ->
+        final_answer(completion, content)
 
       {:ok, completion} ->
         {:ok, completion}

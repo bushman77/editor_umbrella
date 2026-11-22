@@ -5,6 +5,7 @@ defmodule EditorWeb.EditorLlm do
 
   @llm_open_file_max_chars 20_000
   @llm_open_file_total_max_chars 48_000
+  @tool_chat_max_tokens 4_096
 
   @edit_intent_words [
     "apply",
@@ -219,22 +220,28 @@ defmodule EditorWeb.EditorLlm do
     NEVER use "/path/to/your/project", ".", "~", or any placeholder.
     For any list/search operation, use root = "#{cwd}" and path = "." if none is specified.
 
-    #{git_context_section(assigns)}
-    #{related_context_section(assigns)}
     === TOOL USE RULES ===
     - Use only the provided editor tools.
-    - If the answer is in the open editor buffers below, answer from them directly.
+    - If the answer is in the open editor buffers in the user message, answer from them directly.
     - If the code you need is not in context, call editor_read_file or editor_search_workspace yourself. Never ask the user for permission to use a tool.
     - If the user asks to "list files in the project" → immediately call editor_list_files with the root above.
     - Do not guess paths.
     - Be concise. Include file paths and line numbers when relevant.
-    #{intent_contract(question, selected_file)}
     """
 
+    # Everything that changes between requests (git status, related files,
+    # open buffers, the question) lives in the user message. The system
+    # message and the tool schemas rendered after it then stay byte-identical,
+    # so llama-server's prompt cache can reuse them instead of re-reading
+    # thousands of tokens on every question.
     user_message = """
     Current workspace root: #{cwd}
     Selected file: #{selected_file || "(none)"}
+
+    #{git_context_section(assigns)}
+    #{related_context_section(assigns)}
     #{editor_buffer_context() || ""}
+    #{intent_contract(question, selected_file)}
     User question:
     #{question}
     """
@@ -249,7 +256,7 @@ defmodule EditorWeb.EditorLlm do
              tools: editor_tools(),
              tool_choice: tool_choice_for(question),
              max_tool_rounds: 6,
-             max_tokens: 4_096
+             max_tokens: @tool_chat_max_tokens
            ) do
       {:ok,
        %{
@@ -829,12 +836,12 @@ defmodule EditorWeb.EditorLlm do
   defp open_files_for_prompt(cached_open_files) do
     cached_open_files
     |> Enum.reduce_while({[], 0}, fn opened_file, {files, total_chars} ->
-      remaining_chars = @llm_open_file_total_max_chars - total_chars
+      remaining_chars = open_files_total_max_chars() - total_chars
 
       if remaining_chars <= 0 do
         {:halt, {files, total_chars}}
       else
-        max_chars = min(@llm_open_file_max_chars, remaining_chars)
+        max_chars = min(open_file_max_chars(), remaining_chars)
         content = Llm.Prompts.truncate_content(opened_file.content, max_chars)
         prompt_file = %{opened_file | content: content}
 
@@ -843,6 +850,17 @@ defmodule EditorWeb.EditorLlm do
     end)
     |> elem(0)
     |> Enum.reverse()
+  end
+
+  # Open buffers get at most half of the model's prompt budget so tool
+  # results still fit. With a 16k window that is ~14k chars, with 49k ~70k.
+  defp open_files_total_max_chars do
+    budget = Llm.Budget.prompt_char_budget(max_tokens: @tool_chat_max_tokens)
+    min(@llm_open_file_total_max_chars, div(budget, 2))
+  end
+
+  defp open_file_max_chars do
+    min(@llm_open_file_max_chars, open_files_total_max_chars())
   end
 
   defp format_cached_open_file(opened_file) do

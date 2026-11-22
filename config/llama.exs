@@ -28,10 +28,18 @@ profiles = %{
 
   # 35B MoE (3B active). Experts spill to system RAM; thinking disabled so
   # reasoning tokens don't eat the ToolLoop's max_tokens budget.
+  #
+  # Only ~1 in 4 layers uses full attention, so the KV cache stays small and
+  # 32k context is affordable. Prompt and tool-result budgets are derived
+  # from context_size (see Llm.Budget). If llama-server fails to allocate,
+  # drop to 24_576 before touching --n-cpu-moe.
+  #
+  # --n-cpu-moe N keeps the experts of the first N layers on the CPU. Lower it
+  # until VRAM is nearly full (watch nvidia-smi) for more speed.
   "qwen3.6-35b" => %{
     name: "Qwen/Qwen3.6-35B-A3B",
     path: "~/models/Qwen3.6-35B-A3B-IQ3_S.gguf",
-    context_size: 16_384,
+    context_size: 32_768,
     max_tokens: 4_096,
     micro_batch_size: 256,
     sampling: [temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0],
