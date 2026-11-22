@@ -217,20 +217,80 @@ defmodule Llm.ToolLoop do
     end
   end
 
+  @doc """
+  The message sent when the tool-round limit is hit. It repeats the user's
+  original question: after several rounds of tool results the question is
+  thousands of characters back, and small models otherwise answer whatever
+  they were investigating last instead of what was asked.
+  """
+  @spec final_answer_instruction([message()], pos_integer()) :: String.t()
+  def final_answer_instruction(messages, max_rounds) when is_list(messages) do
+    question_section =
+      case original_question(messages) do
+        nil -> ""
+        question -> "\nThe question you must answer:\n#{question}\n"
+      end
+
+    """
+    Stop using tools now.
+
+    You have reached the maximum tool-call round limit of #{max_rounds}.
+    #{question_section}
+    Answer that question directly, using only the tool results and conversation context already available.
+    If the gathered context is incomplete, say exactly what is missing.
+    """
+  end
+
+  @question_marker "User question:"
+  @max_question_chars 1_500
+
+  @doc """
+  The question from the latest user message. Editor requests put context first
+  and the question after a `User question:` line; for those only the question
+  is returned. Plain prompts are returned whole. Capped at 1,500 characters.
+  """
+  @spec original_question([message()]) :: String.t() | nil
+  def original_question(messages) when is_list(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value(fn message ->
+      if message_role(message) == "user", do: message_content(message)
+    end)
+    |> question_text()
+  end
+
+  defp question_text(content) when is_binary(content) do
+    question =
+      case String.split(content, @question_marker) do
+        [_only] -> content
+        parts -> List.last(parts)
+      end
+      |> String.trim()
+
+    cond do
+      question == "" ->
+        nil
+
+      String.length(question) > @max_question_chars ->
+        String.slice(question, 0, @max_question_chars)
+
+      true ->
+        question
+    end
+  end
+
+  defp question_text(_content), do: nil
+
+  defp message_role(message), do: Map.get(message, :role) || Map.get(message, "role")
+  defp message_content(message), do: Map.get(message, :content) || Map.get(message, "content")
+
   defp finalize_from_context(messages, opts, max_rounds) do
     final_messages =
       messages ++
         [
           %{
             role: "user",
-            content: """
-            Stop using tools now.
-
-            You have reached the maximum tool-call round limit of #{max_rounds}.
-
-            Give the best final answer you can using only the tool results and conversation context already available.
-            If the gathered context is incomplete, say exactly what is missing.
-            """
+            content: final_answer_instruction(messages, max_rounds)
           }
         ]
 
