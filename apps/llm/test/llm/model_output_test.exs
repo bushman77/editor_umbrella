@@ -17,6 +17,26 @@ defmodule Llm.ModelOutputTest do
       assert ModelOutput.strip_reasoning("<think>still thinking about") == ""
     end
 
+    test "keeps an answer that mentions the think tag while explaining code" do
+      answer =
+        "1. Reasoning burns context — The `<think>` blocks are dropped before replay, " <>
+          "so the next turn only sees the answer."
+
+      assert ModelOutput.strip_reasoning(answer) == answer
+    end
+
+    test "keeps an answer that quotes the closing tag in backticks" do
+      answer = "A bare `</think>` means the template opened the block in the prompt."
+
+      assert ModelOutput.strip_reasoning(answer) == answer
+    end
+
+    test "strips a leading block but keeps later mentions" do
+      text = "<think>plan</think>\nThe `<think>` tag marks reasoning."
+
+      assert ModelOutput.strip_reasoning(text) == "The `<think>` tag marks reasoning."
+    end
+
     test "leaves ordinary answers untouched apart from trimming" do
       assert ModelOutput.strip_reasoning("  plain answer \n") == "plain answer"
       assert ModelOutput.strip_reasoning(nil) == ""

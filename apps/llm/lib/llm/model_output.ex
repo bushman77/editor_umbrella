@@ -25,36 +25,47 @@ defmodule Llm.ModelOutput do
           raw: map()
         }
 
-  @think_block ~r/<think>.*?<\/think>/s
+  # Leaked reasoning only ever comes first in the output. An answer that
+  # explains code may mention `<think>` or `</think>` later on; those
+  # mentions are text, not reasoning, and must not cut the answer.
+  @leading_think_block ~r/\A\s*<think>.*?<\/think>/s
+  @leading_unterminated_think ~r/\A\s*<think>/
+  # A bare closing tag (the template opened the block in the prompt) is
+  # reasoning only when it is not quoted in backticks.
+  @bare_think_close ~r/(?<!`)<\/think>(?!`)/
   @xml_function ~r/<function=([^>\s]+)\s*>(.*?)<\/function>/s
   @xml_parameter ~r/<parameter=([^>\s]+)\s*>(.*?)<\/parameter>/s
   @tagged_json ~r/<tool_call>\s*(\{.*?\})\s*<\/tool_call>/s
 
   @doc """
-  Removes reasoning blocks and returns the visible answer, trimmed.
+  Removes leaked reasoning and returns the visible answer, trimmed.
 
-  An unterminated `<think>` means the model ran out of tokens while reasoning,
-  so nothing visible remains and `""` is returned.
+  Only reasoning at the start of the output is removed: a leading
+  `<think>...</think>` block, or everything up to a bare `</think>` when the
+  chat template opened the block in the prompt. An unterminated leading
+  `<think>` means the model ran out of tokens while reasoning, so `""` is
+  returned. Tags mentioned later in an answer (for example in backticks while
+  explaining code) are kept as text.
   """
   @spec strip_reasoning(String.t() | nil) :: String.t()
   def strip_reasoning(nil), do: ""
 
   def strip_reasoning(text) when is_binary(text) do
-    text = Regex.replace(@think_block, text, "")
+    text = Regex.replace(@leading_think_block, text, "", global: false)
 
-    text =
-      case String.split(text, "</think>") do
-        [only] -> only
-        parts -> List.last(parts)
-      end
+    cond do
+      Regex.match?(@leading_unterminated_think, text) ->
+        ""
 
-    text =
-      case String.split(text, "<think>", parts: 2) do
-        [before, _unterminated] -> before
-        [only] -> only
-      end
+      String.contains?(text, "<think>") ->
+        String.trim(text)
 
-    String.trim(text)
+      true ->
+        @bare_think_close
+        |> Regex.split(text)
+        |> List.last()
+        |> String.trim()
+    end
   end
 
   # Strings that only ever appear once the model has finished answering and
