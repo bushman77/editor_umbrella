@@ -1047,93 +1047,11 @@ defmodule EditorWeb.EditorLlm do
       else: "auto"
   end
 
+  # The related-files tab bar, as function contracts (specs or heads) the
+  # current file calls in each related file. related_file_specs/1 already
+  # applies the tab bar's include/exclude toggles, so a file switched on there
+  # reaches the model even when it is only a weak match.
   defp related_context_section(assigns) do
-    selected_file = Map.get(assigns, :selected_file)
-    related_files = related_files(assigns)
-    related_file_specs = related_file_specs(assigns)
-
-    cond do
-      is_nil(selected_file) ->
-        ""
-
-      related_files == [] ->
-        ""
-
-      true ->
-        specs_by_path = Map.new(related_file_specs, &{&1.path, &1})
-
-        strong_files =
-          related_files
-          |> Enum.filter(&strong_related_file?(selected_file, &1))
-
-        if strong_files == [] do
-          ""
-        else
-          grouped =
-            strong_files
-            |> Enum.map(fn path ->
-              spec = Map.get(specs_by_path, path, %{})
-              relationship = Map.get(spec, :relationship, "related")
-              functions = Map.get(spec, :functions, [])
-              {path, relationship, functions}
-            end)
-            |> Enum.group_by(&elem(&1, 1), &{elem(&1, 0), elem(&1, 2)})
-
-          uses_section =
-            format_relationship_group(grouped["uses"], "Dependencies (current file uses these)")
-
-          used_by_section =
-            format_relationship_group(
-              grouped["used by"],
-              "Consumers (these use the current file)"
-            )
-
-          bidirectional_section =
-            format_relationship_group(grouped["uses/used by"], "Bidirectional (tightly coupled)")
-
-          test_section = format_relationship_group(grouped["test/template"], "Tests & Templates")
-
-          sections =
-            [uses_section, used_by_section, bidirectional_section, test_section]
-            |> Enum.reject(&(&1 == ""))
-
-          if sections == [] do
-            ""
-          else
-            """
-            === RELATED CONTEXT (pre-discovered by editor) ===
-            Current file: #{selected_file}
-
-            #{Enum.join(sections, "\n\n")}
-
-            These files were discovered through AST analysis and cross-referencing.
-            You may read any of them with editor_read_file instead of searching.
-            Prioritize Dependencies and Consumers for understanding impact of changes.
-            """
-          end
-        end
-    end
-  end
-
-  defp format_relationship_group(nil, _label), do: ""
-
-  defp format_relationship_group(files, label) when is_list(files) do
-    entries =
-      files
-      |> Enum.take(8)
-      |> Enum.map(fn {path, functions} ->
-        func_text =
-          if functions != [] do
-            names = functions |> Enum.map(&Map.get(&1, :name, "?")) |> Enum.take(6)
-            " — calls: #{Enum.join(names, ", ")}"
-          else
-            ""
-          end
-
-        "  - #{path}#{func_text}"
-      end)
-      |> Enum.join("\n")
-
-    "#{label}:\n#{entries}"
+    EditorWeb.RelatedContext.format(Map.get(assigns, :selected_file), related_file_specs(assigns))
   end
 end
