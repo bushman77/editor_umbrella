@@ -38,8 +38,10 @@ defmodule Editor.MixProject do
     [
       {:dns_cluster, "~> 0.2.0"},
       {:phoenix_pubsub, "~> 2.1"},
-      {:ecto_sql, "~> 3.13"},
-      {:postgrex, ">= 0.0.0"},
+      {:decimal, "~> 3.1", override: true},
+      {:ecto, "~> 3.14.0"},
+      {:ecto_sql, "~> 3.14"},
+      {:postgrex, "~> 0.22"},
       {:jason, "~> 1.2"},
       {:swoosh, "~> 1.16"},
       {:req, "~> 0.5"}

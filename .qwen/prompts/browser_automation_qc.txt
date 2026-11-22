@@ -1,0 +1,39 @@
+@apps/llm/lib/browser_automation.ex
+
+Review this Elixir file for grounded quality-control issues.
+
+Rules:
+- Use only the attached file as evidence.
+- Cite exact line numbers or exact function names for every claim.
+- Do not suggest something that is already implemented; list those separately.
+- Do not propose code unless it is valid Elixir.
+- If discussing JavaScript, make clear it is JavaScript embedded in Elixir strings.
+- Prefer real correctness, robustness, testability, and maintainability issues over generic advice.
+- If a claim cannot be proven from this file, say: "not proven from this file."
+
+Return:
+
+1. Findings
+For each finding:
+- severity: critical/high/medium/low
+- evidence: exact line/function
+- issue
+- why it matters
+- suggested fix
+
+2. Already Implemented, Do Not Suggest
+Specifically check whether the file already has:
+- @specs
+- retry or timeout handling
+- config-backed values
+- snapshot handling
+- cookie normalization/restoration
+- health/status functions
+- structured error handling
+
+3. Bad Suggestions To Avoid
+Call out any tempting but wrong advice, especially:
+- saying @specs are missing if they are present
+- saying retry logic is missing if present
+- writing JavaScript syntax as if it were Elixir
+- recommending real-site integration tests as the first test layer

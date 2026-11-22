@@ -5,51 +5,98 @@ import Config
 # -----------------------------------------------------------------------------
 #
 # This file owns all local LLM runtime configuration for editor_umbrella.
+# llama-server is started and monitored by Llm.Application -> Llm.LlamaServer.
 #
-# The bash launcher we tested is only a reference now. In normal app usage,
-# llama-server should be started and monitored by Llm.Application ->
-# Llm.LlamaServer.
+# Switch models without editing this file:
+#
+#     LLM_PROFILE=qwen3.6-35b mix phx.server
+#
+# Hardware target: RTX 3060 6 GB + 16 GB system RAM.
 # -----------------------------------------------------------------------------
+
+profiles = %{
+  # Small dense non-thinking model. Fits entirely in 6 GB VRAM.
+  "qwen3-4b" => %{
+    name: "Qwen/Qwen3-4B-Instruct-2507",
+    path: "~/models/qwen3-4b-instruct-2507/Qwen_Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
+    context_size: 49_152,
+    max_tokens: 16_384,
+    micro_batch_size: 512,
+    sampling: [temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0],
+    extra_args: []
+  },
+
+  # 35B MoE (3B active). Experts spill to system RAM; thinking disabled so
+  # reasoning tokens don't eat the ToolLoop's max_tokens budget.
+  "qwen3.6-35b" => %{
+    name: "Qwen/Qwen3.6-35B-A3B",
+    path: "~/models/Qwen3.6-35B-A3B-IQ3_S.gguf",
+    context_size: 16_384,
+    max_tokens: 4_096,
+    micro_batch_size: 256,
+    sampling: [temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0],
+    extra_args: [
+      "--n-cpu-moe",
+      "30",
+      "--cache-type-k",
+      "q8_0",
+      "--cache-type-v",
+      "q8_0",
+      "--chat-template-kwargs",
+      ~s({"enable_thinking":false})
+    ]
+  }
+}
+
+profile_key = System.get_env("LLM_PROFILE", "qwen3-4b")
+
+profile =
+  Map.get(profiles, profile_key) ||
+    raise "Unknown LLM_PROFILE #{inspect(profile_key)}. " <>
+            "Available: #{profiles |> Map.keys() |> Enum.join(", ")}"
 
 config :llm,
   enabled: true,
+  profile: profile_key,
 
-  # OpenAI-compatible model name sent in /v1/chat/completions payloads.
-  # Keep this aligned with the llama-server --alias value.
-  model_name: "local-model",
-  # GGUF model used by this project.
-  # model: "~/models/qwen2.5-coder-7b-instruct-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-  model: "~/models/Qwen2.5-Coder-32B-Instruct-GGUF/qwen2.5-coder-32b-instruct-q4_k_m.gguf",
-  # llama.cpp runtime.
+  # --- Model -----------------------------------------------------------------
+  # model_name is sent in /v1/chat/completions payloads; alias is the
+  # llama-server --alias. Both derive from the profile so they can't drift.
+  model_name: profile.name,
+  alias: profile.name,
+  model: profile.path,
+
+  # --- llama.cpp runtime -----------------------------------------------------
   llama_dir: "~/llama.cpp",
   llama_server_path: "build/bin/llama-server",
-
-  # Local-only app-owned server.
   host: "127.0.0.1",
   port: 8000,
 
-  # llama-server model/runtime flags.
-  alias: "qwen2.5-coder-32b-instruct",
-  jinja: true,
+  # --- llama-server flags ----------------------------------------------------
   flash_attention: "on",
   gpu_layers: "auto",
   parallel_slots: 1,
-  context_size: 49_152,
-  max_tokens: 8_192,
+  context_size: profile.context_size,
+  max_tokens: profile.max_tokens,
   batch_size: 2_048,
-  micro_batch_size: 512,
+  micro_batch_size: profile.micro_batch_size,
+  # Appended verbatim to the llama-server argv.
+  extra_args: profile.extra_args,
 
-  # Startup/readiness behavior.
+  # --- Default request sampling ----------------------------------------------
+  # Merged under per-call opts in Llm.Client (per-call opts win).
+  sampling: profile.sampling,
+
+  # --- Startup / readiness ---------------------------------------------------
   startup_wait_ms: 30_000,
   poll_interval_ms: 500,
   tcp_connect_timeout_ms: 1_000,
 
-  # Req client behavior.
+  # --- Req client ------------------------------------------------------------
   client_receive_timeout: :infinity,
   client_connect_timeout_ms: 5_000,
 
-  # Native Qwen tool-calling path is the direction now.
-  # Keep OpenCode ACP out of the default path.
+  # --- OpenCode ACP (off; native Qwen tool calling is the default path) ------
   opencode_acp_enabled: false,
   opencode_cmd: "opencode",
   opencode_args: ["acp"],

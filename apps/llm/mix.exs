@@ -24,15 +24,10 @@ defmodule Llm.MixProject do
 
   defp deps do
     [
-<<<<<<< Updated upstream
       {:jason, "~> 1.4"},
-      {:req, "~> 0.5"}
-=======
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"},
-      # {:sibling_app_in_umbrella, in_umbrella: true}
-      {:wallaby, "~> 0.30", only: [:dev, :test]}
->>>>>>> Stashed changes
+      {:req, "~> 0.5"},
+      {:hackney, "~> 4.0", override: true, runtime: false},
+      {:wallaby, "~> 0.31", runtime: false}
     ]
   end
 end

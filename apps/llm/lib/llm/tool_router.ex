@@ -727,6 +727,8 @@ defmodule Llm.ToolRouter do
     end
   end
 
+  def call("editor_patch_file", args) when is_map(args), do: patch_file(args)
+
   def call(name, args) when is_binary(name) and is_map(args) do
     {:error,
      %{
@@ -793,9 +795,31 @@ defmodule Llm.ToolRouter do
   defp workspace_root(root) do
     absolute_root = root |> Path.expand() |> Path.absname()
 
-    case File.dir?(absolute_root) do
-      true -> {:ok, absolute_root}
-      false -> {:error, %{error: "workspace_root_not_found", root: absolute_root}}
+    case System.get_env("LLM_TOOL_WORKSPACE_ROOT") do
+      configured when is_binary(configured) and configured != "" ->
+        trusted_root = Path.expand(configured)
+
+        cond do
+          Path.type(configured) != :absolute ->
+            {:error, %{error: "trusted_workspace_root_not_absolute"}}
+
+          not File.dir?(trusted_root) ->
+            {:error, %{error: "trusted_workspace_root_not_found"}}
+
+          not inside_root?(trusted_root, absolute_root) ->
+            {:error, %{error: "workspace_root_denied", root: absolute_root}}
+
+          true ->
+            with :ok <- reject_symlink_components(trusted_root),
+                 :ok <- reject_symlink_components(absolute_root),
+                 true <- File.dir?(absolute_root) or
+                           {:error, %{error: "workspace_root_not_found", root: absolute_root}} do
+              {:ok, absolute_root}
+            end
+        end
+
+      _ ->
+        {:error, %{error: "trusted_workspace_root_not_configured"}}
     end
   end
 
@@ -806,7 +830,9 @@ defmodule Llm.ToolRouter do
       |> Path.absname()
 
     if inside_root?(absolute_root, absolute_path) do
-      {:ok, absolute_path}
+      with :ok <- reject_symlink_components(absolute_path) do
+        {:ok, absolute_path}
+      end
     else
       {:error,
        %{
@@ -822,8 +848,37 @@ defmodule Llm.ToolRouter do
     absolute_path == absolute_root or String.starts_with?(absolute_path, absolute_root <> "/")
   end
 
+  # Check existing components, including ancestors and the final file. Missing
+  # components are allowed so editor_write_file can create a new nested path.
+  defp reject_symlink_components(absolute_path) do
+    [filesystem_root | segments] = Path.split(absolute_path)
+
+    segments
+    |> Enum.reduce_while({:ok, filesystem_root}, fn segment, {:ok, current} ->
+      candidate = Path.join(current, segment)
+
+      case File.lstat(candidate) do
+        {:ok, %File.Stat{type: :symlink}} ->
+          {:halt, {:error, %{error: "symlink_path_denied", path: candidate}}}
+
+        {:ok, _stat} ->
+          {:cont, {:ok, candidate}}
+
+        {:error, :enoent} ->
+          {:cont, {:ok, candidate}}
+
+        {:error, reason} ->
+          {:halt, {:error, %{error: "path_check_failed", path: candidate, reason: inspect(reason)}}}
+      end
+    end)
+    |> case do
+      {:ok, _path} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
   defp file_stat(path) do
-    case File.stat(path) do
+    case File.lstat(path) do
       {:ok, stat} ->
         {:ok, stat}
 
@@ -855,7 +910,7 @@ defmodule Llm.ToolRouter do
 
           case data do
             data when is_binary(data) and byte_size(data) > max_bytes ->
-              <<content::binary-size(max_bytes), _rest::binary>> = data
+              <<content::binary-size(^max_bytes), _rest::binary>> = data
               {:ok, content, true}
 
             data when is_binary(data) ->
@@ -1004,7 +1059,7 @@ defmodule Llm.ToolRouter do
             true ->
               path = Path.join(dir, name)
 
-              case File.stat(path) do
+              case File.lstat(path) do
                 {:ok, %File.Stat{type: :regular, size: size}} ->
                   if file_extension_allowed?(path, extensions) do
                     file = %{
@@ -1188,7 +1243,7 @@ defmodule Llm.ToolRouter do
   end
 
   defp search_file(root, file_path, normalized_query, case_sensitive?, remaining) do
-    with {:ok, stat} <- File.stat(file_path),
+    with {:ok, stat} <- File.lstat(file_path),
          true <- stat.type == :regular,
          true <- stat.size <= 500_000,
          {:ok, content} <- File.read(file_path),
@@ -1377,7 +1432,7 @@ defmodule Llm.ToolRouter do
     end
   end
 
-  def call("editor_patch_file", args) when is_map(args) do
+  defp patch_file(args) do
     with {:ok, root} <- required_string(args, "root"),
          {:ok, path} <- required_string(args, "path"),
          {:ok, search} <- required_string(args, "search"),
@@ -1450,7 +1505,7 @@ defmodule Llm.ToolRouter do
     # Replace only first occurrence
     case :binary.match(original, search) do
       {pos, len} ->
-        <<before::binary-size(pos), _::binary-size(len), rest::binary>> = original
+        <<before::binary-size(^pos), _::binary-size(^len), rest::binary>> = original
         before <> replace <> rest
 
       :nomatch ->

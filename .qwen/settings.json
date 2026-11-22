@@ -1,0 +1,59 @@
+{
+  "$version": 4,
+  "env": {
+    "QWEN_CODE_LOCAL_API_KEY": "EMPTY",
+    "QWEN_CUSTOM_API_KEY_OPENAI_HTTP_127_0_0_1_8000_V1_7A6284FE97EF": "EMPTY"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "Qwen/Qwen3-4B-Instruct-2507",
+        "name": "Qwen/Qwen3-4B-Instruct-2507",
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "envKey": "QWEN_CUSTOM_API_KEY_OPENAI_HTTP_127_0_0_1_8000_V1_7A6284FE97EF"
+      }
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "tools": {
+    "toolSearch": {
+      "enabled": false
+    },
+    "computerUse": {
+      "enabled": false
+    },
+    "disabled": [
+      "agent",
+      "create_sub_session",
+      "enter_worktree",
+      "exit_worktree",
+      "get_goal",
+      "glob",
+      "grep_search",
+      "list_agents",
+      "list_directory",
+      "read_mcp_resource",
+      "read_file",
+      "send_message",
+      "skill",
+      "task_stop",
+      "todo_write",
+      "tool_search",
+      "update_goal",
+      "web_fetch",
+      "zoom_image"
+    ]
+  },
+  "experimental": {
+    "artifact": false,
+    "cron": false
+  },
+  "model": {
+    "name": "Qwen/Qwen3-4B-Instruct-2507",
+    "baseUrl": "http://127.0.0.1:8000/v1"
+  }
+}

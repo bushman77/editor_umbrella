@@ -40,6 +40,8 @@ defmodule EditorWeb.MixProject do
     [
       {:phoenix, "~> 1.8.0"},
       {:phoenix_ecto, "~> 4.5"},
+      {:decimal, "~> 3.1", override: true},
+      {:ecto, "~> 3.14.0", override: true},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.1.0"},

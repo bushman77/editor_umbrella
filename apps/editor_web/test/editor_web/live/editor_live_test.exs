@@ -336,6 +336,26 @@ defmodule EditorWeb.EditorLiveTest do
   end
 
   @tag :tmp_dir
+  test "clears LLM conversation when OpenCode ACP is disabled", %{conn: conn, tmp_dir: tmp_dir} do
+    refute Process.whereis(Llm.OpenCodeACP)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    open_folder(view, tmp_dir)
+
+    view
+    |> element("#open-llm-button")
+    |> render_click()
+
+    view
+    |> element("#clear-llm-conversation-button")
+    |> render_click()
+
+    assert has_element?(view, "#llm-modal")
+    assert has_element?(view, "#llm-conversation-empty")
+  end
+
+  @tag :tmp_dir
   test "sidebar toggles between file explorer and conversation selector", %{
     conn: conn,
     tmp_dir: tmp_dir

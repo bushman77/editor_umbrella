@@ -29,6 +29,9 @@ defmodule Editor.Umbrella.MixProject do
 
   defp deps do
     [
+      {:decimal, "~> 3.1", override: true},
+      {:ecto, "~> 3.14.0", override: true},
+      {:hackney, "~> 4.0", override: true, runtime: false},
       # Required for `mix format` to handle ~H/HEEx templates at umbrella root
       # only: [:dev, :test], runtime: false}
       {:phoenix_live_view, "~> 1.1.0"}

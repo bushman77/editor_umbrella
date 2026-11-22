@@ -18,8 +18,8 @@ defmodule Llm.ToolLoop do
   require Logger
 
   @default_max_rounds 4
-  @default_temperature 0.1
   @default_max_tokens 1_024
+  @default_chat_option_keys [:temperature, :top_p, :top_k, :min_p, :presence_penalty]
 
   @type message :: map()
   @type run_result ::
@@ -35,10 +35,19 @@ defmodule Llm.ToolLoop do
       opts
       |> Keyword.put_new(:tools, Llm.ToolRouter.tools())
       |> Keyword.put_new(:tool_choice, "auto")
-      |> Keyword.put_new(:temperature, @default_temperature)
       |> Keyword.put_new(:max_tokens, @default_max_tokens)
+      |> put_llm_chat_defaults()
 
     do_run(messages, opts, 0, max_rounds)
+  end
+
+  defp put_llm_chat_defaults(opts) do
+    Enum.reduce(@default_chat_option_keys, opts, fn key, acc ->
+      case Application.fetch_env(:llm, key) do
+        {:ok, value} -> Keyword.put_new(acc, key, value)
+        :error -> acc
+      end
+    end)
   end
 
   @spec run_text(String.t(), keyword()) :: run_result()

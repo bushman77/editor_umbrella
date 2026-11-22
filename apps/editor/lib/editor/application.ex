@@ -11,11 +11,7 @@ defmodule Editor.Application do
       Editor.Repo,
       {DNSCluster, query: Application.get_env(:editor, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Editor.PubSub},
-<<<<<<< Updated upstream
       Editor.OpenFileCache
-=======
-      {Llm.BrowserAutomation, []}
->>>>>>> Stashed changes
       # Start a worker by calling: Editor.Worker.start_link(arg)
       # {Editor.Worker, arg}
     ]
