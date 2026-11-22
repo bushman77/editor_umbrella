@@ -180,6 +180,7 @@ defmodule EditorWeb.EditorLlm do
     - If the code you need is not in context, call editor_read_file or editor_search_workspace yourself. Never ask the user for permission to use a tool.
     - If the user asks to "list files in the project" → immediately call editor_list_files with the root above.
     - Do not guess paths.
+    - If a tool returns an error, say which tool failed and why. Never answer from guesses or invent modules, files or functions to cover a failed or missing lookup.
     - Be concise. Include file paths and line numbers when relevant.
     """
 

@@ -119,6 +119,7 @@ defmodule Llm.ToolLoop do
       Enum.map(tool_calls, fn tool_call ->
         tool_call
         |> execute_tool_call()
+        |> annotate_tool_result()
         |> tool_result_message(tool_call)
       end)
 
@@ -142,6 +143,19 @@ defmodule Llm.ToolLoop do
       tool_calls: Enum.map(tool_calls, & &1.raw)
     }
   end
+
+  @failed_tool_note "This tool call failed. Tell the user which tool failed and the error " <>
+                      "above. Do not answer from guesses or invent modules, files or " <>
+                      "functions to fill the gap. You may retry with corrected arguments."
+
+  @doc """
+  Adds an instruction to failed tool results. Small models tend to treat a
+  failed tool as permission to guess; a note right next to the error is far
+  harder to ignore than a rule thousands of tokens earlier in the prompt.
+  """
+  @spec annotate_tool_result(map()) :: map()
+  def annotate_tool_result(%{ok: false} = result), do: Map.put(result, :note, @failed_tool_note)
+  def annotate_tool_result(result) when is_map(result), do: result
 
   defp strip_replayed_content(content) when is_binary(content),
     do: Llm.ModelOutput.strip_reasoning(content)
