@@ -278,8 +278,8 @@ defmodule Llm.ContextBuilder do
 
                 {node, updated_acc}
 
-              {:def, _, [{name, _, _args}, _body]} = node, acc when is_atom(name) ->
-                {node, update_in(acc.public_functions, &[name | &1])}
+              {:def, _, [head | _]} = node, acc ->
+                {node, maybe_prepend(acc, :public_functions, def_name(head))}
 
               node, acc ->
                 {node, acc}
@@ -675,6 +675,13 @@ defmodule Llm.ContextBuilder do
   end
 
   defp module_name_from_alias_parts(_parts), do: nil
+
+  # `def name(args)`, `def name(args) when guard` and bodiless heads
+  # (`def name(a \\ 1)`). A guarded head is wrapped in a `:when` node, so
+  # matching `{name, _, _}` directly recorded every guarded function as `:when`.
+  defp def_name({:when, _, [head | _]}), do: def_name(head)
+  defp def_name({name, _, _args}) when is_atom(name), do: name
+  defp def_name(_head), do: nil
 
   defp maybe_prepend(acc, _key, nil), do: acc
 

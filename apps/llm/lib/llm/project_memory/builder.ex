@@ -273,8 +273,11 @@ defmodule Llm.ProjectMemory.Builder do
               {:require, _, args} = node, acc ->
                 {node, update_in(acc.referenced_modules, &(extract_module_refs(args) ++ &1))}
 
-              {:def, _, [{name, _, _args}, _body]} = node, acc when is_atom(name) ->
-                {node, update_in(acc.public_functions, &[Atom.to_string(name) | &1])}
+              {:def, _, [head | _]} = node, acc ->
+                case def_name(head) do
+                  nil -> {node, acc}
+                  name -> {node, update_in(acc.public_functions, &[Atom.to_string(name) | &1])}
+                end
 
               node, acc ->
                 {node, acc}
@@ -354,6 +357,12 @@ defmodule Llm.ProjectMemory.Builder do
       String.contains?(content, "def #{symbol}") or String.contains?(content, "#{symbol}(")
     end)
   end
+
+  # A guarded head (`def name(args) when guard`) is wrapped in a `:when` node;
+  # matching `{name, _, _}` directly recorded every guarded function as "when".
+  defp def_name({:when, _, [head | _]}), do: def_name(head)
+  defp def_name({name, _, _args}) when is_atom(name), do: name
+  defp def_name(_head), do: nil
 
   defp extract_aliases(args) do
     args
