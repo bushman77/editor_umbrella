@@ -73,6 +73,85 @@ defmodule Llm.Rag do
     end
   end
 
+  @doc """
+  Retrieved project snippets for the native tool loop, rendered as one
+  prompt-ready string (`""` when nothing relevant was found).
+
+  Uses the same cached project memory and retrieval as `build_context/4`, but
+  returns only function-sized chunk bodies, skipping files the caller already
+  sends in full (the selected file and `:exclude_paths`, typically open editor
+  buffers). Output stops before `:max_chars`.
+
+  Options: `:max_chars` (default 12_000), `:exclude_paths`, plus any
+  `build_context/4` option.
+  """
+  @spec snippet_context(String.t(), String.t() | nil, String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def snippet_context(root_path, selected_file, question, opts \\ [])
+      when is_binary(root_path) and is_binary(question) and is_list(opts) do
+    max_chars = Keyword.get(opts, :max_chars, 12_000)
+
+    excluded =
+      opts
+      |> Keyword.get(:exclude_paths, [])
+      |> List.wrap()
+      |> Kernel.++(List.wrap(selected_file))
+      |> Enum.map(&relative_selected_file(root_path, &1))
+      |> MapSet.new()
+
+    # Budget is enforced here, in characters, after exclusions. A tiny token
+    # budget would let the selected file's own chunks crowd out the rest.
+    build_opts =
+      opts
+      |> Keyword.drop([:max_chars, :exclude_paths])
+      |> Keyword.put(:token_budget, 1_000_000)
+
+    with {:ok, context} <- build_context(root_path, selected_file, question, build_opts) do
+      snippets =
+        context.pack.refs
+        |> Enum.filter(&(&1.type == :file_chunk and is_binary(&1.path)))
+        |> Enum.reject(&MapSet.member?(excluded, &1.path))
+        |> Enum.uniq_by(&{&1.path, &1.start_line, &1.end_line})
+        |> Enum.flat_map(&render_snippet(context.project_memory, &1))
+        |> take_within(max_chars)
+
+      {:ok, Enum.join(snippets, "\n")}
+    end
+  end
+
+  defp render_snippet(project_memory, ref) do
+    project_memory
+    |> ProjectMemory.get_file_chunks(ref.path)
+    |> Enum.find(&(&1.start_line == ref.start_line and &1.end_line == ref.end_line))
+    |> case do
+      %{content: content} when is_binary(content) and content != "" ->
+        [
+          """
+          FILE: #{ref.path} (lines #{ref.start_line}-#{ref.end_line})
+          ```#{ProjectMemory.FileSummary.infer_language(ref.path)}
+          #{String.trim_trailing(content)}
+          ```
+          """
+        ]
+
+      _missing ->
+        []
+    end
+  end
+
+  defp take_within(snippets, max_chars) do
+    {kept, _used} =
+      Enum.reduce_while(snippets, {[], 0}, fn snippet, {kept, used} ->
+        size = String.length(snippet)
+
+        if used + size > max_chars,
+          do: {:halt, {kept, used}},
+          else: {:cont, {[snippet | kept], used + size}}
+      end)
+
+    Enum.reverse(kept)
+  end
+
   defp context_mode(nil), do: :folder
   defp context_mode(_selected_file), do: :file
 

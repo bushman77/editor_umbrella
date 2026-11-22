@@ -46,6 +46,9 @@ The request includes:
 - a stable system message (architectural lens, code rules, workspace root, tool rules),
 - the selected file path, git status and related-file relationships,
 - open editor buffers from `Editor.OpenFileCache`, capped by `Llm.Budget`,
+- retrieved function bodies from other files (`Llm.Rag.snippet_context/4`), ranked by
+  module/file mentions and question terms (`Llm.ContextPack.TermRetrieval`), using the
+  cached project memory; docs and tests are only searched when the question asks,
 - an intent contract for review/refactor/implementation questions,
 - the editor tool schemas from `Llm.ToolRouter.tools/0`.
 

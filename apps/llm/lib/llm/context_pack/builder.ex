@@ -9,6 +9,7 @@ defmodule Llm.ContextPack.Builder do
   """
 
   alias Llm.ContextPack
+  alias Llm.ContextPack.TermRetrieval
   alias Llm.ContextRef
   alias Llm.ProjectMemory
   alias Llm.ProjectMemory.FileChunk
@@ -103,6 +104,7 @@ defmodule Llm.ContextPack.Builder do
       when is_map(project_memory) and is_binary(question) do
     module_refs = refs_for_mentioned_modules(project_memory, question)
     file_refs = refs_for_mentioned_files(project_memory, question)
+    term_refs = refs_for_question_terms(project_memory, question, current_file)
     auth_refs = refs_for_auth_context(project_memory, question)
     player_join_refs = refs_for_player_join_context(project_memory, question)
 
@@ -117,6 +119,7 @@ defmodule Llm.ContextPack.Builder do
 
     module_refs
     |> Kernel.++(file_refs)
+    |> Kernel.++(term_refs)
     |> Kernel.++(auth_refs)
     |> Kernel.++(player_join_refs)
     |> Kernel.++(current_file_related_refs)
@@ -171,6 +174,12 @@ defmodule Llm.ContextPack.Builder do
         end
       end)
     end)
+  end
+
+  defp refs_for_question_terms(project_memory, question, current_file) do
+    project_memory
+    |> TermRetrieval.top_chunks(question, exclude_paths: List.wrap(current_file))
+    |> Enum.map(&FileChunk.to_context_ref/1)
   end
 
   defp refs_for_mentioned_files(project_memory, question) do

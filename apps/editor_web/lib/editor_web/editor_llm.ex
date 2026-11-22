@@ -176,7 +176,7 @@ defmodule EditorWeb.EditorLlm do
 
     === TOOL USE RULES ===
     - Use only the provided editor tools.
-    - If the answer is in the open editor buffers in the user message, answer from them directly.
+    - If the answer is in the open editor buffers or retrieved snippets in the user message, answer from them directly.
     - If the code you need is not in context, call editor_read_file or editor_search_workspace yourself. Never ask the user for permission to use a tool.
     - If the user asks to "list files in the project" → immediately call editor_list_files with the root above.
     - Do not guess paths.
@@ -188,13 +188,16 @@ defmodule EditorWeb.EditorLlm do
     # message and the tool schemas rendered after it then stay byte-identical,
     # so llama-server's prompt cache can reuse them instead of re-reading
     # thousands of tokens on every question.
+    buffer_context = editor_buffer_context() || ""
+
     user_message = """
     Current workspace root: #{cwd}
     Selected file: #{selected_file || "(none)"}
 
     #{git_context_section(assigns)}
     #{related_context_section(assigns)}
-    #{editor_buffer_context() || ""}
+    #{buffer_context}
+    #{retrieved_snippets_section(cwd, selected_file, question, buffer_context)}
     #{intent_contract(question, selected_file)}
     User question:
     #{question}
@@ -685,6 +688,35 @@ defmodule EditorWeb.EditorLlm do
 
   defp open_file_max_chars do
     min(@llm_open_file_max_chars, open_files_total_max_chars())
+  end
+
+  # Function bodies from elsewhere in the project that match the question,
+  # so the model often needs no tool round at all. Gets the room left after
+  # open buffers, capped at a third of the budget so tool results still fit.
+  # Retrieval failures never block the request.
+  defp retrieved_snippets_section(cwd, selected_file, question, buffer_context) do
+    budget = Llm.Budget.prompt_char_budget(max_tokens: @tool_chat_max_tokens)
+    third = div(budget, 3)
+    max_chars = min(third, budget - third - String.length(buffer_context))
+
+    with true <- max_chars >= 1_500,
+         {:ok, text} when text != "" <-
+           Llm.Rag.snippet_context(cwd, selected_file, question,
+             max_chars: max_chars,
+             exclude_paths: Enum.map(cached_open_files(), & &1.path)
+           ) do
+      """
+      === RETRIEVED PROJECT SNIPPETS ===
+      Function bodies from other project files that match the question. They may be
+      partial; read the file with editor_read_file if you need the rest.
+
+      #{text}
+      """
+    else
+      _no_snippets -> ""
+    end
+  rescue
+    _error -> ""
   end
 
   defp format_cached_open_file(opened_file) do
