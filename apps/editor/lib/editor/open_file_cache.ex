@@ -95,6 +95,27 @@ defmodule Editor.OpenFileCache do
     end
   end
 
+  @doc """
+  Cached files that live inside `root` (a project's workspace root), in the
+  same order as `list_files/0`. The cache is shared by every editor session,
+  so this keeps one project's open files out of another project's prompts.
+  """
+  @spec list_files(String.t() | nil) :: [t()]
+  def list_files(nil), do: list_files()
+
+  def list_files(root) when is_binary(root) do
+    Enum.filter(list_files(), &in_root?(&1.path, root))
+  end
+
+  @doc "True when `path` is `root` or inside it. Both are expanded first."
+  @spec in_root?(String.t(), String.t()) :: boolean()
+  def in_root?(path, root) when is_binary(path) and is_binary(root) do
+    path = Path.expand(path)
+    root = root |> Path.expand() |> String.trim_trailing("/")
+
+    path == root or String.starts_with?(path, root <> "/")
+  end
+
   @spec file_metadata(t()) :: metadata()
   def file_metadata(%__MODULE__{} = opened_file) do
     Map.take(opened_file, [:path, :byte_size, :opened_at, :in_focus?])

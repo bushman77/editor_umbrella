@@ -35,4 +35,34 @@ defmodule Editor.OpenFileCacheTest do
     assert_receive {:open_files_updated, remaining_files}
     refute Enum.any?(remaining_files, &(&1.path == second_file.path))
   end
+
+  test "list_files/1 keeps only files inside one project's root" do
+    unique = System.unique_integer([:positive])
+    project_a = "/tmp/editor-cache-a-#{unique}"
+    project_b = "/tmp/editor-cache-b-#{unique}"
+    in_a = Path.join(project_a, "lib/a.ex")
+    in_b = Path.join(project_b, "lib/b.ex")
+
+    on_exit(fn ->
+      Editor.OpenFileCache.delete_file(in_a)
+      Editor.OpenFileCache.delete_file(in_b)
+    end)
+
+    {:ok, _} = Editor.OpenFileCache.cache_file(in_a, "a")
+    {:ok, _} = Editor.OpenFileCache.cache_file(in_b, "b")
+
+    paths = project_a |> Editor.OpenFileCache.list_files() |> Enum.map(& &1.path)
+
+    assert in_a in paths
+    refute in_b in paths
+    assert in_b in Enum.map(Editor.OpenFileCache.list_files(nil), & &1.path)
+  end
+
+  test "in_root?/2 matches whole path segments, not prefixes" do
+    assert Editor.OpenFileCache.in_root?("/home/me/SunRacer/lib/x.ex", "/home/me/SunRacer")
+    assert Editor.OpenFileCache.in_root?("/home/me/SunRacer/lib/x.ex", "/home/me/SunRacer/")
+    assert Editor.OpenFileCache.in_root?("/home/me/SunRacer", "/home/me/SunRacer")
+    refute Editor.OpenFileCache.in_root?("/home/me/SunRacer2/lib/x.ex", "/home/me/SunRacer")
+    refute Editor.OpenFileCache.in_root?("/home/me/editor_umbrella/a.ex", "/home/me/SunRacer")
+  end
 end

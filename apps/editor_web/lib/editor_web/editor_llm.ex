@@ -62,6 +62,7 @@ defmodule EditorWeb.EditorLlm do
 
   @request_assign_keys [
     :cwd,
+    :workspace_root,
     :selected_file,
     :related_files,
     :related_file_context_overrides,
@@ -203,7 +204,8 @@ defmodule EditorWeb.EditorLlm do
     # the shared prefix instead of re-reading thousands of tokens.
     history = history_messages(assigns)
     history_chars = Llm.ConversationHistory.char_count(history)
-    buffer_context = editor_buffer_context() || ""
+    open_files = cached_open_files(Map.get(assigns, :workspace_root) || cwd)
+    buffer_context = editor_buffer_context(open_files) || ""
 
     user_message = """
     Current workspace root: #{cwd}
@@ -212,7 +214,7 @@ defmodule EditorWeb.EditorLlm do
     #{git_context_section(assigns)}
     #{related_context_section(assigns)}
     #{buffer_context}
-    #{retrieved_snippets_section(cwd, selected_file, question, buffer_context, history_chars)}
+    #{retrieved_snippets_section(cwd, selected_file, question, buffer_context, history_chars, open_files)}
     #{intent_contract(question, selected_file)}
     User question:
     #{question}
@@ -636,8 +638,11 @@ defmodule EditorWeb.EditorLlm do
     Llm.Conversation.recent_messages(conversation_id)
   end
 
-  defp cached_open_files do
-    Editor.OpenFileCache.list_files()
+  # Only files inside this project: the cache is shared by every editor
+  # session, so another project's open tabs must not reach this prompt.
+  defp cached_open_files(workspace_root) do
+    workspace_root
+    |> Editor.OpenFileCache.list_files()
     |> Enum.sort_by(fn opened_file ->
       {if(opened_file.in_focus?, do: 0, else: 1), opened_file.opened_at}
     end)
@@ -672,8 +677,8 @@ defmodule EditorWeb.EditorLlm do
     open_file_paths_for_context(cached_paths, open_tabs)
   end
 
-  defp editor_buffer_context do
-    case cached_open_files() do
+  defp editor_buffer_context(open_files) do
+    case open_files do
       [] -> nil
       opened_files -> cached_open_files_prompt(opened_files)
     end
@@ -730,7 +735,14 @@ defmodule EditorWeb.EditorLlm do
   # so the model often needs no tool round at all. Gets the room left after
   # open buffers, capped at a third of the budget so tool results still fit.
   # Retrieval failures never block the request.
-  defp retrieved_snippets_section(cwd, selected_file, question, buffer_context, history_chars) do
+  defp retrieved_snippets_section(
+         cwd,
+         selected_file,
+         question,
+         buffer_context,
+         history_chars,
+         open_files
+       ) do
     budget = Llm.Budget.prompt_char_budget(max_tokens: @tool_chat_max_tokens)
     third = div(budget, 3)
     max_chars = min(third, budget - third - String.length(buffer_context) - history_chars)
@@ -739,7 +751,7 @@ defmodule EditorWeb.EditorLlm do
          {:ok, text} when text != "" <-
            Llm.Rag.snippet_context(cwd, selected_file, question,
              max_chars: max_chars,
-             exclude_paths: Enum.map(cached_open_files(), & &1.path)
+             exclude_paths: Enum.map(open_files, & &1.path)
            ) do
       """
       === RETRIEVED PROJECT SNIPPETS ===
