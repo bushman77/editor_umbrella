@@ -27,6 +27,13 @@ config :editor_web,
   ecto_repos: [Editor.Repo],
   generators: [context_app: :editor]
 
+<<<<<<< Updated upstream
+=======
+config :llm,
+  enabled: true,
+  model: "~/models/qwen2.5-coder/qwen2.5-coder-7b-instruct-q5_k_m.gguf"
+
+>>>>>>> Stashed changes
 # Configures the endpoint
 config :editor_web, EditorWeb.Endpoint,
   url: [host: "localhost"],
@@ -66,7 +73,11 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
-
+config :wallaby,
+  driver: Wallaby.Chrome,
+  chromedriver: [
+    headless: false
+  ]
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

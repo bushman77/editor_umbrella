@@ -64,6 +64,16 @@ config :editor_web, EditorWeb.Endpoint,
     ]
   ]
 
+# config/dev.exs
+config :llm, Llm.BrowserAutomation, use_persistent_profile: true
+
+config :wallaby,
+  driver: Wallaby.Chrome,
+  js_errors: false,
+  chromedriver: [
+    headless: false
+  ]
+
 # Enable dev routes for dashboard and mailbox
 config :editor_web, dev_routes: true
 
