@@ -13,6 +13,10 @@ defmodule Llm.ToolRouter do
   @type tool_args :: map()
   @type tool_result :: {:ok, map()} | {:error, map()}
 
+  # Tab-separated: short hash, author date, subject. Dates let the model
+  # answer "what changed today?"; --oneline had none.
+  @git_log_format "--format=%h%x09%ad%x09%s"
+
   @default_max_read_bytes 200_000
 
   @spec tools() :: [map()]
@@ -141,7 +145,7 @@ defmodule Llm.ToolRouter do
         function: %{
           name: "editor_git_diff",
           description:
-            "Shows git diffs. Can show uncommitted changes (unstaged, staged, or all vs HEAD), a specific commit, or diff between two refs. Optional path limits to a specific file or directory.",
+            "Shows git diffs. With no mode it shows only UNCOMMITTED changes (working tree vs HEAD). To see what a past commit changed, use mode 'commit' with a hash from editor_git_log. Optional path limits to a specific file or directory.",
           parameters: %{
             type: "object",
             properties: %{
@@ -175,7 +179,7 @@ defmodule Llm.ToolRouter do
         function: %{
           name: "editor_git_log",
           description:
-            "Shows recent commit history. Optional path limits to commits touching a specific file.",
+            "Shows recent commits, newest first, each with hash, date (YYYY-MM-DD HH:MM) and subject. Use it first for questions about what changed today or recently. Optional path limits to commits touching a specific file.",
           parameters: %{
             type: "object",
             properties: %{
@@ -481,7 +485,11 @@ defmodule Llm.ToolRouter do
          {:ok, limit} <- positive_integer_arg(args, "limit", 10),
          {:ok, absolute_path} <- maybe_resolve_path(absolute_root, path_arg),
          {:ok, output, exit_status} <-
-           run_git(absolute_root, ["log", "--oneline", "-#{limit}"] ++ path_args(absolute_path)) do
+           run_git(
+             absolute_root,
+             ["log", @git_log_format, "--date=format:%Y-%m-%d %H:%M", "-#{limit}"] ++
+               path_args(absolute_path)
+           ) do
       {:ok,
        %{
          root: absolute_root,
@@ -1317,17 +1325,18 @@ defmodule Llm.ToolRouter do
     end
   end
 
-  defp parse_git_log(output) do
+  @doc false
+  @spec parse_git_log(String.t()) :: [%{hash: String.t(), date: String.t(), message: String.t()}]
+  def parse_git_log(output) when is_binary(output) do
     output
     |> String.split("\n", trim: true)
     |> Enum.map(fn line ->
-      case String.split(line, " ", parts: 2) do
-        [hash, message] -> %{hash: hash, message: message}
-        [hash] -> %{hash: hash, message: ""}
-        _ -> nil
+      case String.split(line, "\t", parts: 3) do
+        [hash, date, message] -> %{hash: hash, date: date, message: message}
+        [hash, date] -> %{hash: hash, date: date, message: ""}
+        [hash] -> %{hash: hash, date: "", message: ""}
       end
     end)
-    |> Enum.reject(&is_nil/1)
   end
 
   defp validate_line_range(start_line, end_line)

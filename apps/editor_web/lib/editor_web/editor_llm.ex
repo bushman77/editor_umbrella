@@ -210,6 +210,7 @@ defmodule EditorWeb.EditorLlm do
     user_message = """
     Current workspace root: #{cwd}
     Selected file: #{selected_file || "(none)"}
+    Today's date: #{NaiveDateTime.local_now() |> NaiveDateTime.to_date() |> Date.to_iso8601()}
 
     #{git_context_section(assigns)}
     #{related_context_section(assigns)}
@@ -273,6 +274,8 @@ defmodule EditorWeb.EditorLlm do
     - #{dirty_summary}
     - Git tools are available: editor_git_diff, editor_git_diff_stat, editor_git_log, editor_git_blame
     - Use git tools to inspect changes, history, or blame when relevant to the user's question.
+    - For questions about what changed (today, recently, in a commit, "the fix"): call editor_git_log first (pass path when you know the file), then editor_git_diff with mode "commit" and the hash. Without a mode, editor_git_diff shows only uncommitted changes.
+    - A change can be in a caller rather than in the function itself. Check the commits for every file involved before saying something did not change.
     """
   end
 
