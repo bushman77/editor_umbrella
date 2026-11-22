@@ -30,6 +30,22 @@ defmodule Llm.ModelOutputTest do
       assert ModelOutput.collapse_repetition(looped) == "It is in tool_loop.ex. ✅ --- End . ✅"
     end
 
+    test "collapses check marks with no spaces between them" do
+      looped = "--- End of Response " <> String.duplicate("✅", 500)
+
+      assert ModelOutput.collapse_repetition(looped) == "--- End of Response ✅"
+    end
+
+    test "collapses emoji that carry a variation selector" do
+      assert ModelOutput.collapse_repetition("ok " <> String.duplicate("✔️", 30)) == "ok ✔️"
+    end
+
+    test "leaves long runs of ASCII alone (markdown rules, padding)" do
+      rule = String.duplicate("-", 40)
+
+      assert ModelOutput.collapse_repetition("a\n" <> rule <> "\nb") == "a\n" <> rule <> "\nb"
+    end
+
     test "collapses repeated words too" do
       assert ModelOutput.collapse_repetition("done" <> String.duplicate(" done", 25)) == "done"
     end
@@ -38,6 +54,22 @@ defmodule Llm.ModelOutputTest do
       text = "Checks: ✅ ✅ ✅\n\nvery very good\n" <> Enum.join(List.duplicate("0", 10), " ")
 
       assert ModelOutput.collapse_repetition(text) == String.trim(text)
+    end
+  end
+
+  describe "loop_stop_sequences/0" do
+    test "the looping tail of a real answer hits a stop sequence" do
+      tail =
+        "Thus, the tool loop lives in: apps/llm/lib/llm/tool_loop.ex . ✅\n\n" <>
+          "(No further action required.) ✅✅✅\n\n--- Final Answer : ..."
+
+      assert Enum.any?(ModelOutput.loop_stop_sequences(), &String.contains?(tail, &1))
+    end
+
+    test "a normal answer with one check mark and a markdown rule does not" do
+      answer = "Fixed. ✅\n\n---\n\nNext, run mix test."
+
+      refute Enum.any?(ModelOutput.loop_stop_sequences(), &String.contains?(answer, &1))
     end
   end
 

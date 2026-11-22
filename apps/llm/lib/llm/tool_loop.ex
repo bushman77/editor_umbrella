@@ -35,6 +35,7 @@ defmodule Llm.ToolLoop do
       |> Keyword.put_new(:tools, Llm.ToolRouter.tools())
       |> Keyword.put_new(:tool_choice, "auto")
       |> Keyword.put_new(:max_tokens, @default_max_tokens)
+      |> Keyword.put_new(:stop, Llm.ModelOutput.loop_stop_sequences())
       |> put_llm_chat_defaults()
 
     Llm.ToolRouter.with_workspace_root(Keyword.get(opts, :workspace_root), fn ->

@@ -57,18 +57,32 @@ defmodule Llm.ModelOutput do
     String.trim(text)
   end
 
-  # One short token (an emoji, a word, a symbol) repeated many times in a row.
-  # Small models fall into this at the end of an answer ("✅ ✅ ✅ ...") and
-  # keep going until max_tokens. 20 repeats never happens in a real answer.
-  @repetition_loop ~r/(\S{1,12})(?:\s+\1){19,}/u
+  # Strings that only ever appear once the model has finished answering and
+  # started looping on restatements and check marks. Sent as `stop` so
+  # llama-server ends generation right there instead of running to max_tokens.
+  @loop_stop_sequences ["✅✅✅", "✅ ✅ ✅", "--- Final", "--- ✅", "--- End of Response"]
+
+  # Repetition loops that still get through:
+  #   * a symbol or emoji repeated 20+ times, with or without spaces ("✅✅✅")
+  #   * any short token repeated 20+ times separated by whitespace ("done done")
+  # 20 repeats never happens in a real answer.
+  @symbol_loop ~r/(\p{So}\x{FE0F}?)(?:\s*\1){19,}/u
+  @spaced_loop ~r/(\S{1,12})(?:\s+\1){19,}/u
+
+  @doc "Stop sequences that end a looping answer early."
+  @spec loop_stop_sequences() :: [String.t()]
+  def loop_stop_sequences, do: @loop_stop_sequences
 
   @doc """
-  Collapses a degenerate repetition loop (the same short token 20+ times in a
-  row) down to a single occurrence, then trims. Other text is left alone.
+  Collapses a degenerate repetition loop (the same symbol or short token 20+
+  times in a row) down to a single occurrence, then trims. Other text is left
+  alone.
   """
   @spec collapse_repetition(String.t()) :: String.t()
   def collapse_repetition(text) when is_binary(text) do
-    @repetition_loop
+    text = Regex.replace(@symbol_loop, text, "\\1")
+
+    @spaced_loop
     |> Regex.replace(text, "\\1")
     |> String.trim()
   end
