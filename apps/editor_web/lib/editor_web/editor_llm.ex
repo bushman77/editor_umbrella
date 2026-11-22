@@ -255,6 +255,7 @@ defmodule EditorWeb.EditorLlm do
            Llm.tool_chat(messages,
              tools: editor_tools(),
              tool_choice: tool_choice_for(question),
+             workspace_root: cwd,
              max_tool_rounds: 6,
              max_tokens: @tool_chat_max_tokens
            ) do

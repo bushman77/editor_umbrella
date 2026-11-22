@@ -1,11 +1,5 @@
 import Config
 
-# MCP uses STDIO: reserve stdout for JSON-RPC, not application logs.
-# This has no effect on normal editor startup.
-if System.get_env("EDITOR_MCP_ENABLED") == "1" do
-  config :logger, :default_handler, config: [type: :standard_error]
-end
-
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration

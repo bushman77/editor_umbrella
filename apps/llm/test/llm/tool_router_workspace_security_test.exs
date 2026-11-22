@@ -157,4 +157,36 @@ defmodule Llm.ToolRouterWorkspaceSecurityTest do
 
     refute Enum.any?(files, fn file -> String.contains?(file.path, "secret.txt") end)
   end
+
+  test "the editor workspace authorizes tools when the env var is unset", %{
+    project: project,
+    outside: outside
+  } do
+    System.delete_env("LLM_TOOL_WORKSPACE_ROOT")
+
+    ToolRouter.with_workspace_root(project, fn ->
+      assert {:ok, %{content: "red red\n"}} =
+               ToolRouter.call("editor_read_file", %{"root" => project, "path" => "sample.txt"})
+
+      assert {:error, %{error: "workspace_root_denied"}} =
+               ToolRouter.call("editor_read_file", %{"root" => outside, "path" => "secret.txt"})
+
+      # A wider root than the open workspace is refused too.
+      assert {:error, %{error: "workspace_root_denied"}} =
+               ToolRouter.call("editor_list_files", %{"root" => Path.dirname(project)})
+    end)
+
+    assert {:error, %{error: "trusted_workspace_root_not_configured"}} =
+             ToolRouter.call("editor_read_file", %{"root" => project, "path" => "sample.txt"})
+  end
+
+  test "the env var still wins over the editor workspace", %{project: project, outside: outside} do
+    ToolRouter.with_workspace_root(outside, fn ->
+      assert {:ok, %{content: "red red\n"}} =
+               ToolRouter.call("editor_read_file", %{"root" => project, "path" => "sample.txt"})
+
+      assert {:error, %{error: "workspace_root_denied"}} =
+               ToolRouter.call("editor_read_file", %{"root" => outside, "path" => "secret.txt"})
+    end)
+  end
 end

@@ -37,7 +37,9 @@ defmodule Llm.ToolLoop do
       |> Keyword.put_new(:max_tokens, @default_max_tokens)
       |> put_llm_chat_defaults()
 
-    do_run(messages, opts, 0, max_rounds)
+    Llm.ToolRouter.with_workspace_root(Keyword.get(opts, :workspace_root), fn ->
+      do_run(messages, opts, 0, max_rounds)
+    end)
   end
 
   defp put_llm_chat_defaults(opts) do

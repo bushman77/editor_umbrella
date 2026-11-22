@@ -746,10 +746,43 @@ defmodule Llm.ToolRouter do
     end
   end
 
+  @workspace_root_key :llm_tool_trusted_workspace_root
+
+  @doc """
+  Runs `fun` with `root` as the trusted workspace root for tool calls made in
+  this process. `Llm.ToolLoop` uses it to scope tools to the editor's open
+  project, so the model cannot pass a wider `root` (such as the home folder).
+
+  `LLM_TOOL_WORKSPACE_ROOT`, when set, still takes precedence. With neither
+  set, every file tool is denied.
+  """
+  @spec with_workspace_root(String.t() | nil, (-> result)) :: result when result: term()
+  def with_workspace_root(nil, fun) when is_function(fun, 0), do: fun.()
+
+  def with_workspace_root(root, fun) when is_binary(root) and is_function(fun, 0) do
+    previous = Process.get(@workspace_root_key)
+    Process.put(@workspace_root_key, root)
+
+    try do
+      fun.()
+    after
+      if previous,
+        do: Process.put(@workspace_root_key, previous),
+        else: Process.delete(@workspace_root_key)
+    end
+  end
+
+  defp trusted_workspace_root do
+    case System.get_env("LLM_TOOL_WORKSPACE_ROOT") do
+      configured when is_binary(configured) and configured != "" -> configured
+      _unset -> Process.get(@workspace_root_key)
+    end
+  end
+
   defp workspace_root(root) do
     absolute_root = root |> Path.expand() |> Path.absname()
 
-    case System.get_env("LLM_TOOL_WORKSPACE_ROOT") do
+    case trusted_workspace_root() do
       configured when is_binary(configured) and configured != "" ->
         trusted_root = Path.expand(configured)
 
