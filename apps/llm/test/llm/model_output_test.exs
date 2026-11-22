@@ -23,6 +23,24 @@ defmodule Llm.ModelOutputTest do
     end
   end
 
+  describe "collapse_repetition/1" do
+    test "collapses a long run of the same token at the end of an answer" do
+      looped = "It is in tool_loop.ex. ✅ --- End . " <> String.duplicate("✅ ", 300)
+
+      assert ModelOutput.collapse_repetition(looped) == "It is in tool_loop.ex. ✅ --- End . ✅"
+    end
+
+    test "collapses repeated words too" do
+      assert ModelOutput.collapse_repetition("done" <> String.duplicate(" done", 25)) == "done"
+    end
+
+    test "leaves short, legitimate repetition alone" do
+      text = "Checks: ✅ ✅ ✅\n\nvery very good\n" <> Enum.join(List.duplicate("0", 10), " ")
+
+      assert ModelOutput.collapse_repetition(text) == String.trim(text)
+    end
+  end
+
   describe "parse_tool_calls/1" do
     test "parses Qwen XML tool calls and decodes non-string values" do
       text = """

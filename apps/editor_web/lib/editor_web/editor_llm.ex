@@ -187,6 +187,7 @@ defmodule EditorWeb.EditorLlm do
     - Do not guess paths.
     - If a tool returns an error, say which tool failed and why. Never answer from guesses or invent modules, files or functions to cover a failed or missing lookup.
     - Be concise. Include file paths and line numbers when relevant.
+    - Answer once, then stop. Do not add a "Final Answer" restatement, a summary of the answer, a list of rules you followed, or check marks.
 
     === CONVERSATION HISTORY ===
     Earlier questions and your earlier answers from this conversation come before the current request.

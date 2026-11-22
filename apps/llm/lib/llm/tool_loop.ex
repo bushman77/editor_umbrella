@@ -106,7 +106,12 @@ defmodule Llm.ToolLoop do
   end
 
   defp final_answer(completion, content) do
-    case Llm.ModelOutput.strip_reasoning(content) do
+    visible =
+      content
+      |> Llm.ModelOutput.strip_reasoning()
+      |> Llm.ModelOutput.collapse_repetition()
+
+    case visible do
       "" -> {:ok, completion}
       visible -> {:ok, visible}
     end

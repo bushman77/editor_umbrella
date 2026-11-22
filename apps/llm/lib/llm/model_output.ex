@@ -57,6 +57,22 @@ defmodule Llm.ModelOutput do
     String.trim(text)
   end
 
+  # One short token (an emoji, a word, a symbol) repeated many times in a row.
+  # Small models fall into this at the end of an answer ("✅ ✅ ✅ ...") and
+  # keep going until max_tokens. 20 repeats never happens in a real answer.
+  @repetition_loop ~r/(\S{1,12})(?:\s+\1){19,}/u
+
+  @doc """
+  Collapses a degenerate repetition loop (the same short token 20+ times in a
+  row) down to a single occurrence, then trims. Other text is left alone.
+  """
+  @spec collapse_repetition(String.t()) :: String.t()
+  def collapse_repetition(text) when is_binary(text) do
+    @repetition_loop
+    |> Regex.replace(text, "\\1")
+    |> String.trim()
+  end
+
   @doc "True when text looks like a tool call the server failed to parse."
   @spec tool_call_text?(String.t() | nil) :: boolean()
   def tool_call_text?(text) when is_binary(text) do

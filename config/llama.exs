@@ -14,6 +14,10 @@ import Config
 # Hardware target: RTX 3060 6 GB + 16 GB system RAM.
 # -----------------------------------------------------------------------------
 
+# presence_penalty: Qwen suggests 0-2 to stop endless repetition. Without it
+# the 4B model can finish an answer and then loop on "Final Answer ✅ ✅ ✅"
+# until max_tokens. Raise toward 1.5 if loops persist; too high can make it
+# avoid repeating identifiers it legitimately needs.
 profiles = %{
   # Small dense non-thinking model. Fits entirely in 6 GB VRAM.
   "qwen3-4b" => %{
@@ -22,7 +26,7 @@ profiles = %{
     context_size: 49_152,
     max_tokens: 16_384,
     micro_batch_size: 512,
-    sampling: [temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0],
+    sampling: [temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0, presence_penalty: 1.0],
     extra_args: []
   },
 
@@ -42,7 +46,7 @@ profiles = %{
     context_size: 32_768,
     max_tokens: 4_096,
     micro_batch_size: 256,
-    sampling: [temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0],
+    sampling: [temperature: 0.7, top_p: 0.8, top_k: 20, min_p: 0.0, presence_penalty: 1.0],
     extra_args: [
       "--n-cpu-moe",
       "30",
