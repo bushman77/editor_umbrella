@@ -102,10 +102,4 @@ config :llm,
 
   # --- Req client ------------------------------------------------------------
   client_receive_timeout: :infinity,
-  client_connect_timeout_ms: 5_000,
-
-  # --- OpenCode ACP (off; native Qwen tool calling is the default path) ------
-  opencode_acp_enabled: false,
-  opencode_cmd: "opencode",
-  opencode_args: ["acp"],
-  opencode_cwd: File.cwd!()
+  client_connect_timeout_ms: 5_000

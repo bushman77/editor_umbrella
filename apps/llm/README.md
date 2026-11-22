@@ -6,7 +6,7 @@ It owns three jobs:
 
 1. starting and checking the local `llama-server` runtime,
 2. building grounded editor context from the current workspace,
-3. sending editor questions to the local model or the OpenCode ACP agent path.
+3. running editor questions through a native tool-calling loop against the local model.
 
 The app is intentionally local-first. It is designed for code review, explanation, implementation guidance, and small refactor suggestions inside the browser editor without depending on a hosted API.
 
@@ -14,40 +14,44 @@ The app is intentionally local-first. It is designed for code review, explanatio
 
 | Module | Role |
 | --- | --- |
-| `Llm` | Public API for chat, agent chat, context building, status checks, and session reset. |
+| `Llm` | Public API for chat, tool chat, context building, and status checks. |
 | `Llm.LlamaServer` | Starts and monitors a local `llama-server` process on `127.0.0.1:8000`. |
 | `Llm.Client` | Sends OpenAI-compatible chat requests to `llama-server`. |
-| `Llm.OpenCodeACP` | Owns a long-lived `opencode acp` subprocess and tracks ACP sessions per workspace. |
+| `Llm.ToolLoop` | Bounded tool-call loop: send messages + tools, run requested tools, repeat until a final answer. |
+| `Llm.ToolRouter` | Tool definitions and execution, clamped to the trusted workspace root. |
+| `Llm.ModelOutput` | Strips leaked `<think>` blocks and parses tool calls the server left as text. |
+| `Llm.Budget` | Prompt and tool-result size limits derived from the profile's context size. |
+| `Llm.Sampling` | Default sampling settings from the profile `sampling:` list. |
 | `Llm.Rag` | Editor-aware retrieval boundary. Builds project memory and returns a prompt-ready context pack. |
 | `Llm.ProjectMemory` | In-memory project snapshot made of file summaries, file chunks, pinned refs, and recent refs. |
 | `Llm.ContextPack` | Compact bundle of messages, refs, summaries, metadata, and token estimates for a single request. |
 | `Llm.ContextPack.Builder` | Main prompt assembly path for grounded editor requests. |
 | `Llm.Prompts` | Shared prompt helpers, message constructors, truncation, prompt stats, and legacy direct prompt builders. |
 | `Llm.Conversation` | Stores recent turns and summaries for editor conversation continuity. |
-| `Llm.Codex` | Placeholder GenServer boundary for future Codex-oriented workflows. |
 
 ## Editor Request Flow
 
 The browser editor path currently runs through `EditorWeb.EditorLlm`:
 
 ```text
-EditorWeb.EditorLlm.agent_chat/2
-  -> Llm.build_context/4
-  -> Llm.Rag.build_context/4
-  -> Llm.ProjectMemory.Builder.build/2
-  -> Llm.ContextPack.Builder.build/2
-  -> Llm.agent_chat/2
-  -> Llm.OpenCodeACP.prompt/2
+EditorWeb.EditorLlm.tool_agent_chat/2
+  -> Llm.tool_chat/2
+  -> Llm.ToolLoop.run/2
+       -> Llm.Client.chat_completion/2   (llama-server /v1/chat/completions)
+       -> Llm.ToolRouter.call/2          (when the model requests a tool)
 ```
 
-The request context includes:
+The request includes:
 
-- the selected file, when one is open,
-- related files selected by the editor,
-- open editor buffers from `Editor.OpenFileCache`,
-- recent conversation turns,
-- a conversation summary,
-- token-budget metadata for the UI.
+- a stable system message (architectural lens, code rules, workspace root, tool rules),
+- the selected file path, git status and related-file relationships,
+- open editor buffers from `Editor.OpenFileCache`, capped by `Llm.Budget`,
+- an intent contract for review/refactor/implementation questions,
+- the editor tool schemas from `Llm.ToolRouter.tools/0`.
+
+Everything that changes between requests goes in the user message so the system
+message and tool schemas stay identical and llama-server can reuse its prompt cache.
+Tool calls are scoped to the editor's open workspace (`workspace_root:`).
 
 Open editor buffers are important because they may include unsaved edits. When buffer content overlaps with on-disk project-memory snippets, the assistant should prefer the buffer content.
 
@@ -133,19 +137,6 @@ how can, how do, implement, add, include, wire, connect, notify, broadcast, when
 
 Implementation responses should distinguish existing code from proposed code, avoid invented APIs, avoid unreachable callback changes, and name the visible producer/consumer boundary when event wiring is involved.
 
-## Current Agent Path Caveat
-
-The editor UI currently calls `Llm.agent_chat/2`, which wraps the built context into a final-answer prompt for `opencode acp`.
-
-That final wrapper is built in `Llm.build_agent_prompt/4`. It forwards selected context snippets, file metadata, open-buffer context, and final-answer rules. It does not replay every system contract from `Llm.ContextPack.Builder` verbatim.
-
-Practical rule:
-
-- For direct llama-server chat behavior, inspect `Llm.ContextPack.Builder` and `Llm.Prompts`.
-- For the editor modal / OpenCode ACP behavior, inspect `Llm.build_agent_prompt/4` and `final_answer_instructions/1` in `Llm` first.
-
-If the editor assistant ignores a context-pack contract, the fix probably belongs in `Llm.build_agent_prompt/4` or `final_answer_instructions/1`, not only in `Llm.ContextPack.Builder`.
-
 ## Direct Chat Path
 
 The lower-level direct chat path is still available:
@@ -173,106 +164,22 @@ http://127.0.0.1:8000/v1/chat/completions
 
 ## Runtime Configuration
 
-The main local model config lives in the umbrella `config/llama.exs`, imported by
-`config/config.exs`:
+The local model config lives in the umbrella `config/llama.exs`, imported by
+`config/config.exs`. It defines model profiles and picks one with `LLM_PROFILE`:
 
-```elixir
-qwen3_model_name = "Qwen/Qwen3-4B-Instruct-2507"
-
-config :llm,
-  enabled: true,
-  model_name: qwen3_model_name,
-  alias: qwen3_model_name,
-  model: "/home/default/models/qwen3-4b-instruct-2507/Qwen_Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
-  llama_dir: "~/llama.cpp",
-  llama_server_path: "build/bin/llama-server",
-  host: "127.0.0.1",
-  port: 8000,
-  jinja: true,
-  reasoning: "auto",
-  flash_attention: "on",
-  gpu_layers: "auto",
-  parallel_slots: 1,
-  context_size: 49_152,
-  max_tokens: 16_384,
-  temperature: 0.7,
-  top_p: 0.8,
-  top_k: 20,
-  min_p: 0.0,
-  batch_size: 2_048,
-  micro_batch_size: 512,
-  startup_wait_ms: 30_000,
-  poll_interval_ms: 500,
-  tcp_connect_timeout_ms: 1_000,
-  client_receive_timeout: :infinity,
-  client_connect_timeout_ms: 5_000,
-  opencode_acp_enabled: true,
-  opencode_cmd: "opencode",
-  opencode_args: ["acp"],
-  opencode_cwd: File.cwd!()
+```bash
+LLM_PROFILE=qwen3.6-35b mix phx.server   # default profile: qwen3-4b
 ```
+
+Each profile sets the GGUF path, `context_size`, `max_tokens`, `micro_batch_size`,
+a `sampling:` list, and `extra_args` appended verbatim to the `llama-server` command.
 
 `Llm.LlamaServer` reads its llama.cpp path, bind address, Qwen3 chat-template flags,
 sampling defaults, and startup timing from `config :llm`. Paths that can contain
 `~` are expanded before use.
 
-The current GGUF is Qwen3-4B-Instruct-2507. It is a non-thinking Qwen3-Instruct
-model, so the app keeps llama.cpp Jinja chat templating enabled and lets
-`llama-server` detect reasoning mode from the embedded template.
-
-The configured `llama-server` defaults are tuned for local coding work:
-
-```text
-host: 127.0.0.1
-port: 8000
-context: 32768
-max output tokens: 8192
-parallel slots: 1
-batch: 2048
-micro-batch: 512
-flash attention: on
-gpu layers: auto
-```
-
-The default config assumes a local `llama.cpp` checkout at:
-
-```text
-~/llama.cpp
-```
-
-and a server executable at:
-
-```text
-~/llama.cpp/build/bin/llama-server
-```
-
-## OpenCode ACP Configuration
-
-`Llm.OpenCodeACP` defaults to:
-
-```text
-opencode acp
-```
-
-Its startup behavior is configured in the same `config :llm` block:
-
-```elixir
-config :llm,
-  opencode_acp_enabled: true,
-  opencode_cmd: "opencode",
-  opencode_args: ["acp"],
-  opencode_cwd: File.cwd!()
-```
-
-Sessions are tracked per workspace `cwd`, so separate project roots should not trample each other.
-
-Useful runtime checks:
-
-```elixir
-Llm.opencode_acp_running?()
-Llm.opencode_acp_state()
-Llm.reset_agent_session(File.cwd!())
-```
+The default config assumes a local `llama.cpp` checkout at `~/llama.cpp` with the
+server executable at `~/llama.cpp/build/bin/llama-server`.
 
 ## Prompt Debugging
 
@@ -282,7 +189,7 @@ Useful inspection points from IEx:
 Llm.status()
 Llm.ready?()
 Llm.LlamaServer.model_path()
-Llm.opencode_acp_state()
+Llm.LlamaServer.server_args()
 ```
 
 Build a context pack manually:
@@ -343,7 +250,8 @@ When changing prompting behavior, update the tests with the prompt contract you 
 Good places to change behavior:
 
 - `Llm.ContextPack.Builder` for RAG context selection and direct context-pack messages.
-- `Llm.build_agent_prompt/4` for the editor modal / OpenCode ACP prompt wrapper.
+- `EditorWeb.EditorLlm.tool_agent_chat/2` for the editor modal's system/user messages.
+- `Llm.ToolLoop` and `Llm.ModelOutput` for how model replies and tool calls are handled.
 - `Llm.Prompts` for shared helpers, message constructors, truncation, and legacy direct prompt builders.
 - `EditorWeb.EditorLlm` for what editor state is passed into the LLM request.
 

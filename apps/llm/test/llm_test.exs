@@ -1,12 +1,6 @@
 defmodule LlmTest do
   use ExUnit.Case
 
-  test "codex genserver starts with empty state" do
-    ensure_codex_started()
-
-    assert Llm.Codex.state() == %{}
-  end
-
   test "application only supervises llama server when llm is enabled" do
     original_enabled = Application.get_env(:llm, :enabled, true)
 
@@ -19,7 +13,6 @@ defmodule LlmTest do
     refute Enum.any?(Llm.Application.child_specs(), &match?({Llm.LlamaServer, []}, &1))
     assert Enum.any?(Llm.Application.child_specs(), &match?({Llm.Conversation, []}, &1))
     assert Enum.any?(Llm.Application.child_specs(), &match?({Llm.ProjectMemory.Cache, []}, &1))
-    assert Enum.any?(Llm.Application.child_specs(), &match?({Llm.Codex, []}, &1))
 
     Application.put_env(:llm, :enabled, true)
 
@@ -39,12 +32,6 @@ defmodule LlmTest do
     refute Llm.ready?()
     assert Llm.status() == %{enabled?: false, ready?: false, reason: :llm_disabled}
     assert Llm.chat("hello") == {:error, :llm_disabled}
-  end
-
-  test "reset agent session is quiet when OpenCode ACP is not started" do
-    refute Process.whereis(Llm.OpenCodeACP)
-
-    assert Llm.reset_agent_session(System.tmp_dir!()) == :ok
   end
 
   test "llama server model path comes from llm config" do
@@ -1291,38 +1278,5 @@ defmodule LlmTest do
     unless Process.whereis(Llm.ProjectMemory.Cache) do
       start_supervised!({Llm.ProjectMemory.Cache, []})
     end
-  end
-
-  defp ensure_codex_started do
-    unless Process.whereis(Llm.Codex) do
-      start_supervised!({Llm.Codex, []})
-    end
-  end
-
-  test "agent prompt prevents review guidance from becoming invented implementations" do
-    prompt =
-      Llm.agent_prompt_preview(
-        "/workspace/project",
-        "where do you suggest we start?",
-        nil,
-        nil
-      )
-
-    assert prompt =~ "Do not move from review guidance into implementation"
-    assert prompt =~ "Do not invent toy/example implementations for existing project functions"
-
-    assert prompt =~
-             "Do not propose replacement code for an existing function unless that exact function body is visible"
-
-    assert prompt =~
-             "If only summaries or partial snippets are visible, name the exact function/file to inspect next"
-
-    assert prompt =~
-             "When the user asks where to start, choose one concrete target function or boundary and explain why"
-
-    assert prompt =~
-             ~s(Do not output headings such as "Goal", "Constraints & Preferences", "Progress")
-
-    assert prompt =~ "unless the user explicitly asks for that format"
   end
 end

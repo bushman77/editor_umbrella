@@ -7,33 +7,6 @@ defmodule EditorWeb.EditorLlm do
   @llm_open_file_total_max_chars 48_000
   @tool_chat_max_tokens 4_096
 
-  @edit_intent_words [
-    "apply",
-    "change",
-    "clean up",
-    "deal with",
-    "delete",
-    "deduplicate",
-    "fix",
-    "handle",
-    "implement",
-    "move",
-    "refactor",
-    "remove",
-    "rename",
-    "replace",
-    "rewrite",
-    "simplify",
-    "update"
-  ]
-
-  @recommendation_intent_words [
-    "recommendation",
-    "recommendations",
-    "item",
-    "items"
-  ]
-
   # Questions containing any of these force a tool call on the first round.
   # ToolLoop drops back to "auto" after that round.
   @tool_required_phrases [
@@ -162,25 +135,6 @@ defmodule EditorWeb.EditorLlm do
              llm_pending_question: trimmed_question
            ]
          }}
-    end
-  end
-
-  @spec agent_chat(map(), String.t()) :: {:ok, map()} | {:error, term()}
-  def agent_chat(assigns, question) when is_map(assigns) and is_binary(question) do
-    with {:ok, context} <- request_context(assigns, question),
-         prepared_question = prepare_agent_question(assigns, question),
-         {:ok, response} <-
-           Llm.agent_chat(
-             prepared_question,
-             cwd: assigns.cwd,
-             context: context,
-             buffer_context: editor_buffer_context()
-           ) do
-      {:ok,
-       %{
-         response: response,
-         llm_context: preview_context(context, assigns, question)
-       }}
     end
   end
 
@@ -602,89 +556,6 @@ defmodule EditorWeb.EditorLlm do
     end)
   end
 
-  defp prepare_agent_question(assigns, question) do
-    question = String.trim(question || "")
-
-    if edit_intent?(question) do
-      edit_agent_question(assigns, question)
-    else
-      question
-    end
-  end
-
-  defp edit_intent?(question) when is_binary(question) do
-    text = String.downcase(question)
-
-    contains_any?(text, @edit_intent_words) or
-      recommendation_edit_intent?(text)
-  end
-
-  defp edit_intent?(_question), do: false
-
-  defp recommendation_edit_intent?(text) when is_binary(text) do
-    contains_any?(text, @recommendation_intent_words) and
-      String.contains?(text, ["1", "2", "3", "one", "two", "three", "through", "to", "-"])
-  end
-
-  defp contains_any?(text, words) when is_binary(text) and is_list(words) do
-    Enum.any?(words, &String.contains?(text, &1))
-  end
-
-  defp edit_agent_question(assigns, question) do
-    cwd = Map.get(assigns, :cwd)
-    selected_file = Map.get(assigns, :selected_file)
-    selected_file_label = selected_file_label(selected_file, cwd)
-
-    """
-    You are acting as this editor's code-change agent.
-
-    Workspace root:
-    #{cwd}
-
-    Selected file:
-    #{selected_file_label}
-
-    User request:
-    #{question}
-
-    Output contract:
-    - Return only a unified diff inside a fenced diff code block.
-    - Do not write a tutorial.
-    - Do not repeat generic recommendations.
-    - Do not say "Certainly", "I can help", or similar filler.
-    - Do not claim changes unless the diff contains the change.
-    - Preserve public APIs unless the user explicitly asks otherwise.
-    - Keep the patch minimal, focused, and compilable.
-    - Patch the selected file unless the user clearly names another file.
-    - If the selected file is missing or the request needs another file, return exactly: NEED_MORE_CONTEXT: reason.
-    - If no code change is needed, return exactly: NO_CHANGE_NEEDED: reason.
-    """
-  end
-
-  defp selected_file_label(path, cwd) when is_binary(path) and is_binary(cwd) do
-    expanded_cwd = Path.expand(cwd)
-
-    expanded_path =
-      if Path.type(path) == :absolute do
-        Path.expand(path)
-      else
-        Path.expand(path, expanded_cwd)
-      end
-
-    relative = Path.relative_to(expanded_path, expanded_cwd)
-
-    if relative == expanded_path do
-      path
-    else
-      relative
-    end
-  rescue
-    _ -> path
-  end
-
-  defp selected_file_label(path, _cwd) when is_binary(path), do: path
-  defp selected_file_label(_path, _cwd), do: "[none]"
-
   defp new_conversation_id(cwd) do
     conversation_id = Llm.Conversation.new_id(cwd)
     Llm.Conversation.ensure(conversation_id, project_id: cwd)
@@ -696,24 +567,6 @@ defmodule EditorWeb.EditorLlm do
       project_id: cwd,
       current_file: selected_file
     }
-  end
-
-  defp request_context(assigns, question) do
-    trimmed_question = String.trim(question || "")
-    conversation_id = Map.get(assigns, :llm_conversation_id)
-
-    Llm.build_context(
-      assigns.cwd,
-      assigns.selected_file,
-      trimmed_question,
-      related_files: related_files(assigns),
-      related_file_specs: related_file_specs(assigns),
-      open_files: open_file_paths_for_agent(assigns),
-      token_budget: 16_384,
-      conversation_id: conversation_id,
-      recent_messages: recent_messages(conversation_id),
-      conversation_summary: conversation_summary(conversation_id)
-    )
   end
 
   defp preview_context(assigns, question) when is_map(assigns) and is_binary(question) do
@@ -735,30 +588,6 @@ defmodule EditorWeb.EditorLlm do
     }
   end
 
-  defp preview_context(%{pack: pack} = context, assigns, question) when is_binary(question) do
-    metadata = Map.get(pack, :metadata, %{})
-
-    %{
-      "mode" => context_mode_label(Map.get(context, :mode)),
-      "path" => Map.get(context, :primary_path) || assigns.cwd,
-      "question" => question,
-      "file_count" => length(Map.get(context, :files, [])),
-      "open_file_count" => length(open_file_paths_for_agent(assigns)),
-      "conversation_id" => Map.get(assigns, :llm_conversation_id),
-      "recent_message_count" => map_value(metadata, :recent_message_count, 0),
-      "prompt_stats" => %{
-        estimated_tokens: Map.get(pack, :estimated_tokens, 0),
-        message_count: length(Map.get(context, :messages, []))
-      }
-    }
-  end
-
-  defp context_mode_label(:file), do: "file"
-  defp context_mode_label(:folder), do: "folder"
-  defp context_mode_label(other) when is_atom(other), do: Atom.to_string(other)
-  defp context_mode_label(other) when is_binary(other), do: other
-  defp context_mode_label(_other), do: "unknown"
-
   defp related_file_count(nil, related_files), do: length(related_files)
   defp related_file_count(_selected_file, related_files), do: length(related_files) + 1
 
@@ -766,12 +595,6 @@ defmodule EditorWeb.EditorLlm do
 
   defp recent_messages(conversation_id) when is_binary(conversation_id) do
     Llm.Conversation.recent_messages(conversation_id)
-  end
-
-  defp conversation_summary(nil), do: nil
-
-  defp conversation_summary(conversation_id) when is_binary(conversation_id) do
-    Llm.Conversation.summary(conversation_id)
   end
 
   defp cached_open_files do

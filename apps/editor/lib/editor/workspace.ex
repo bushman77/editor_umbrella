@@ -3,7 +3,7 @@ defmodule Editor.Workspace do
   Data structure for a project/workspace the editor is allowed to open.
 
   A workspace is the durable boundary for file operations, project memory,
-  conversations, and OpenCode sessions. File browsing can move within the root,
+  and conversations. File browsing can move within the root,
   but path helpers in `EditorWeb.EditorWorkspace` should keep every operation
   clamped to `root`.
   """

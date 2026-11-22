@@ -14,17 +14,8 @@ defmodule Llm.Application do
     [
       {Llm.ConversationStore, []},
       {Llm.Conversation, []},
-      {Llm.ProjectMemory.Cache, []},
-      {Llm.Codex, []}
-    ] ++ opencode_acp_child_specs() ++ llama_server_child_specs()
-  end
-
-  defp opencode_acp_child_specs do
-    if Application.get_env(:llm, :opencode_acp_enabled, true) do
-      [{Llm.OpenCodeACP, []}]
-    else
-      []
-    end
+      {Llm.ProjectMemory.Cache, []}
+    ] ++ llama_server_child_specs()
   end
 
   defp llama_server_child_specs do

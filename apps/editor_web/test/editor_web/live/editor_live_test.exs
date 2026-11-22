@@ -336,9 +336,7 @@ defmodule EditorWeb.EditorLiveTest do
   end
 
   @tag :tmp_dir
-  test "clears LLM conversation when OpenCode ACP is disabled", %{conn: conn, tmp_dir: tmp_dir} do
-    refute Process.whereis(Llm.OpenCodeACP)
-
+  test "clears the LLM conversation", %{conn: conn, tmp_dir: tmp_dir} do
     {:ok, view, _html} = live(conn, ~p"/")
 
     open_folder(view, tmp_dir)

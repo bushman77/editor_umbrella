@@ -1644,8 +1644,6 @@ defmodule EditorWeb.EditorLive do
   defp reset_active_llm_conversation(socket) do
     cwd = socket.assigns.cwd
 
-    Llm.reset_agent_session(cwd)
-
     socket
     |> reset_llm_conversation(cwd)
     |> assign(:llm_loading?, false)
