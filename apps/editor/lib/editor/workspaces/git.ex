@@ -24,8 +24,10 @@ defmodule Editor.Workspaces.Git do
       case run_git(args, cwd: Path.dirname(project.local_path), timeout: timeout) do
         {:ok, output, 0} ->
           {:ok, %{output: String.trim(output), branch: project.branch}}
+
         {:ok, output, status} ->
           {:error, {:clone_failed, status, String.trim(output)}}
+
         {:error, reason} ->
           {:error, reason}
       end
@@ -39,8 +41,10 @@ defmodule Editor.Workspaces.Git do
     case run_git(["pull", "origin", project.branch], cwd: project.local_path, timeout: timeout) do
       {:ok, output, 0} ->
         {:ok, %{output: String.trim(output), branch: project.branch}}
+
       {:ok, output, status} ->
         {:error, {:pull_failed, status, String.trim(output)}}
+
       {:error, reason} ->
         {:error, reason}
     end
@@ -48,13 +52,15 @@ defmodule Editor.Workspaces.Git do
 
   @spec status(project()) :: {:ok, map()} | {:error, term()}
   def status(project) do
-    with {:ok, branch_out, 0} <- run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: project.local_path),
+    with {:ok, branch_out, 0} <-
+           run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd: project.local_path),
          {:ok, dirty_out, 0} <- run_git(["status", "--porcelain"], cwd: project.local_path) do
-      {:ok, %{
-        branch: String.trim(branch_out),
-        dirty?: String.trim(dirty_out) != "",
-        dirty_files: parse_dirty_files(dirty_out)
-      }}
+      {:ok,
+       %{
+         branch: String.trim(branch_out),
+         dirty?: String.trim(dirty_out) != "",
+         dirty_files: parse_dirty_files(dirty_out)
+       }}
     else
       {:ok, output, status} -> {:error, {:git_error, status, String.trim(output)}}
       {:error, reason} -> {:error, reason}
@@ -73,9 +79,10 @@ defmodule Editor.Workspaces.Git do
     cwd = Keyword.fetch!(opts, :cwd)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
-    task = Task.async(fn ->
-      System.cmd("git", args, cd: cwd, stderr_to_stdout: true)
-    end)
+    task =
+      Task.async(fn ->
+        System.cmd("git", args, cd: cwd, stderr_to_stdout: true)
+      end)
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
       {:ok, {output, status}} -> {:ok, output, status}
@@ -101,6 +108,7 @@ defmodule Editor.Workspaces.Git do
       case line do
         <<status::binary-size(2), " ", path::binary>> ->
           %{status: String.trim(status), path: path}
+
         path ->
           %{status: "??", path: path}
       end

@@ -3,7 +3,7 @@ defmodule EditorWeb.EditorLlm do
 
   import Phoenix.Component, only: [assign: 3, to_form: 2]
 
-  @llm_open_file_max_chars 12_000
+  @llm_open_file_max_chars 20_000
   @llm_open_file_total_max_chars 48_000
 
   @edit_intent_words [
@@ -31,6 +31,28 @@ defmodule EditorWeb.EditorLlm do
     "recommendations",
     "item",
     "items"
+  ]
+
+  # Questions containing any of these force a tool call on the first round.
+  # ToolLoop drops back to "auto" after that round.
+  @tool_required_phrases [
+    "where is",
+    "where does",
+    "where do",
+    "where are",
+    "which module",
+    "which file",
+    "what calls",
+    "who calls",
+    "how does",
+    "find",
+    "search",
+    "show me the file",
+    "show me the code",
+    "read the file",
+    "open the file",
+    "list files",
+    "list all"
   ]
 
   @type response_segment :: {:text, String.t()} | {:code, String.t(), String.t()}
@@ -99,11 +121,7 @@ defmodule EditorWeb.EditorLlm do
   end
 
   @spec apply_updates(term(), map() | keyword()) :: term()
-  def apply_updates(socket, updates) when is_map(updates) do
-    Enum.reduce(updates, socket, fn {key, value}, acc -> assign(acc, key, value) end)
-  end
-
-  def apply_updates(socket, updates) when is_list(updates) do
+  def apply_updates(socket, updates) when is_map(updates) or is_list(updates) do
     Enum.reduce(updates, socket, fn {key, value}, acc -> assign(acc, key, value) end)
   end
 
@@ -205,8 +223,8 @@ defmodule EditorWeb.EditorLlm do
     #{related_context_section(assigns)}
     === TOOL USE RULES ===
     - Use only the provided editor tools.
-    - CHECK THE RELATED CONTEXT SECTION ABOVE FIRST. If the answer is there, use it directly without searching.
-    - Only use editor_search_workspace when the user explicitly asks to search OR when RELATED CONTEXT doesn't have what you need.
+    - If the answer is in the open editor buffers below, answer from them directly.
+    - If the code you need is not in context, call editor_read_file or editor_search_workspace yourself. Never ask the user for permission to use a tool.
     - If the user asks to "list files in the project" → immediately call editor_list_files with the root above.
     - Do not guess paths.
     - Be concise. Include file paths and line numbers when relevant.
@@ -216,7 +234,7 @@ defmodule EditorWeb.EditorLlm do
     user_message = """
     Current workspace root: #{cwd}
     Selected file: #{selected_file || "(none)"}
-
+    #{editor_buffer_context() || ""}
     User question:
     #{question}
     """
@@ -372,23 +390,17 @@ defmodule EditorWeb.EditorLlm do
   end
 
   @spec handle_failure(term(), :request_failed | :task_crashed, term()) :: term()
-  def handle_failure(socket, :request_failed, reason) do
+  def handle_failure(socket, kind, reason) when kind in [:request_failed, :task_crashed] do
     socket
     |> assign(:llm_loading?, false)
     |> assign(:llm_response, nil)
     |> assign(:llm_context, nil)
     |> assign(:llm_pending_question, nil)
-    |> assign(:llm_error, "LLM request failed: #{inspect(reason)}")
+    |> assign(:llm_error, failure_message(kind, reason))
   end
 
-  def handle_failure(socket, :task_crashed, reason) do
-    socket
-    |> assign(:llm_loading?, false)
-    |> assign(:llm_response, nil)
-    |> assign(:llm_context, nil)
-    |> assign(:llm_pending_question, nil)
-    |> assign(:llm_error, "LLM task crashed: #{inspect(reason)}")
-  end
+  defp failure_message(:request_failed, reason), do: "LLM request failed: #{inspect(reason)}"
+  defp failure_message(:task_crashed, reason), do: "LLM task crashed: #{inspect(reason)}"
 
   @spec target_label(String.t(), String.t() | nil) :: String.t()
   def target_label(cwd, nil), do: "Folder: #{cwd}"
@@ -463,14 +475,16 @@ defmodule EditorWeb.EditorLlm do
   def related_files(_assigns), do: []
 
   @spec related_file_specs(map()) :: [map()]
-  def related_file_specs(%{
-        selected_file: selected_file,
-        related_files: related_files,
-        related_file_context_overrides: overrides
-      })
+  def related_file_specs(
+        %{
+          selected_file: selected_file,
+          related_files: related_files,
+          related_file_context_overrides: overrides
+        } = assigns
+      )
       when is_binary(selected_file) and is_list(related_files) and is_map(overrides) do
-    related_files
-    |> Enum.filter(&related_file_included?(selected_file, &1, overrides))
+    assigns
+    |> related_files()
     |> Enum.map(fn path ->
       %{
         path: path,
@@ -959,16 +973,7 @@ defmodule EditorWeb.EditorLlm do
   defp public_related_function?(%{kind: kind}), do: kind in ["def", "defmacro", "defdelegate"]
 
   defp assigned_modal_messages(%{llm_messages: messages}) when is_list(messages) do
-    messages
-    |> Enum.with_index()
-    |> Enum.map(fn {message, index} ->
-      %{
-        id: message_dom_id(message, index),
-        role: Map.get(message, :role, "user"),
-        content: Map.get(message, :content, ""),
-        pending?: false
-      }
-    end)
+    to_modal_messages(messages)
   end
 
   defp assigned_modal_messages(assigns), do: stored_modal_messages(assigns)
@@ -982,19 +987,24 @@ defmodule EditorWeb.EditorLlm do
       _pid ->
         conversation_id
         |> Llm.Conversation.recent_messages(48, include_assistant?: true)
-        |> Enum.with_index()
-        |> Enum.map(fn {message, index} ->
-          %{
-            id: message_dom_id(message, index),
-            role: Map.get(message, :role, "user"),
-            content: Map.get(message, :content, ""),
-            pending?: false
-          }
-        end)
+        |> to_modal_messages()
     end
   end
 
   defp stored_modal_messages(_assigns), do: []
+
+  defp to_modal_messages(messages) do
+    messages
+    |> Enum.with_index()
+    |> Enum.map(fn {message, index} ->
+      %{
+        id: message_dom_id(message, index),
+        role: Map.get(message, :role, "user"),
+        content: Map.get(message, :content, ""),
+        pending?: false
+      }
+    end)
+  end
 
   defp maybe_append_pending_message(messages, %{
          llm_pending_question: question,
@@ -1051,7 +1061,7 @@ defmodule EditorWeb.EditorLlm do
   end
 
   defp parse_response([line | rest], current_lines, segments, nil) do
-    case Regex.run(~r/^```([\w+-]*)\s*\$/, line) do
+    case Regex.run(~r/^```([\w+-]*)\s*$/, line) do
       [_, language] ->
         text = Enum.reverse(current_lines) |> Enum.join("\n")
 
@@ -1122,26 +1132,10 @@ defmodule EditorWeb.EditorLlm do
   end
 
   defp tool_choice_for(question) do
-    q = String.downcase(question)
-
-    if String.contains?(q, [
-         "where is",
-         "find",
-         "search",
-         "show me the file",
-         "show me the code",
-         "read the file",
-         "open the file",
-         "list files",
-         "list all"
-       ]) do
-      "required"
-    else
-      "auto"
-    end
+    if String.contains?(String.downcase(question), @tool_required_phrases),
+      do: "required",
+      else: "auto"
   end
-
-  # apps/editor_web/lib/editor_web/editor_llm.ex
 
   defp related_context_section(assigns) do
     selected_file = Map.get(assigns, :selected_file)

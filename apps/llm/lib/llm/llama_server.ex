@@ -15,16 +15,19 @@ defmodule Llm.LlamaServer do
   use GenServer
   require Logger
 
-  @default_model_path "~/models/qwen2.5-coder-7b-instruct-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf"
+  @default_model_name "Qwen/Qwen3-4B-Instruct-2507"
+  @default_model_path "~/models/qwen3-4b-instruct-2507/Qwen_Qwen3-4B-Instruct-2507-Q5_K_M.gguf"
   @default_llama_dir "~/llama.cpp"
   @default_llama_server_path "build/bin/llama-server"
   @default_host "127.0.0.1"
   @default_port 8000
+  @default_jinja true
+  @default_reasoning "auto"
   @default_flash_attention "on"
   @default_gpu_layers "auto"
   @default_parallel_slots 1
   @default_context_size 32_768
-  @default_max_tokens 8_192
+  @default_max_tokens 16_384
   @default_batch_size 2_048
   @default_micro_batch_size 512
   @default_startup_wait_ms 30_000
@@ -173,33 +176,41 @@ defmodule Llm.LlamaServer do
     ])
   end
 
-  defp server_args do
-    [
-      "--model",
-      model_path(),
-      "--alias",
-      model_alias(),
-      "--jinja",
-      "--host",
-      host(),
-      "--port",
-      to_string(port()),
-      "--flash-attn",
-      flash_attention(),
-      "--gpu-layers",
-      gpu_layers(),
-      "--parallel",
-      to_string(parallel_slots()),
-      "--ctx-size",
-      to_string(context_size()),
-      "--n-predict",
-      to_string(max_tokens()),
-      "--batch-size",
-      to_string(batch_size()),
-      "--ubatch-size",
-      to_string(micro_batch_size())
+  @doc false
+  @spec server_args() :: [String.t()]
+  def server_args do
+    sampling = Application.get_env(:llm, :sampling, [])
+
+    options = [
+      {"--model", model_path()},
+      {"--alias", model_alias()},
+      {"--jinja", Application.get_env(:llm, :jinja, true)},
+      {"--reasoning", reasoning()},
+      {"--reasoning-format", reasoning_format()},
+      {"--host", host()},
+      {"--port", port()},
+      {"--flash-attn", flash_attention()},
+      {"--gpu-layers", gpu_layers()},
+      {"--parallel", parallel_slots()},
+      {"--ctx-size", context_size()},
+      {"--n-predict", max_tokens()},
+      {"--temp", sampling[:temperature]},
+      {"--top-p", sampling[:top_p]},
+      {"--top-k", sampling[:top_k]},
+      {"--min-p", sampling[:min_p]},
+      {"--presence-penalty", sampling[:presence_penalty]},
+      {"--batch-size", batch_size()},
+      {"--ubatch-size", micro_batch_size()}
     ]
+
+    Enum.flat_map(options, &to_argv/1) ++ Application.get_env(:llm, :extra_args, [])
   end
+
+  # nil / false -> omitted, true -> bare flag, anything else -> flag + value
+  defp to_argv({_flag, nil}), do: []
+  defp to_argv({_flag, false}), do: []
+  defp to_argv({flag, true}), do: [flag]
+  defp to_argv({flag, value}), do: [flag, to_string(value)]
 
   # ---------------------------------------------------------------------------
   # Readiness helpers
@@ -234,7 +245,7 @@ defmodule Llm.LlamaServer do
     Application.get_env(
       :llm,
       :alias,
-      Application.get_env(:llm, :model_name, "local-model")
+      Application.get_env(:llm, :model_name, @default_model_name)
     )
   end
 
@@ -275,6 +286,22 @@ defmodule Llm.LlamaServer do
     Application.get_env(:llm, :port, @default_port)
   end
 
+  defp jinja_args do
+    case Application.get_env(:llm, :jinja, @default_jinja) do
+      true -> ["--jinja"]
+      false -> ["--no-jinja"]
+      _other -> []
+    end
+  end
+
+  defp reasoning do
+    Application.get_env(:llm, :reasoning, @default_reasoning)
+  end
+
+  defp reasoning_format do
+    Application.get_env(:llm, :reasoning_format)
+  end
+
   defp flash_attention do
     Application.get_env(:llm, :flash_attention, @default_flash_attention)
   end
@@ -293,6 +320,26 @@ defmodule Llm.LlamaServer do
 
   defp max_tokens do
     Application.get_env(:llm, :max_tokens, @default_max_tokens)
+  end
+
+  defp temperature do
+    Application.get_env(:llm, :temperature)
+  end
+
+  defp top_p do
+    Application.get_env(:llm, :top_p)
+  end
+
+  defp top_k do
+    Application.get_env(:llm, :top_k)
+  end
+
+  defp min_p do
+    Application.get_env(:llm, :min_p)
+  end
+
+  defp presence_penalty do
+    Application.get_env(:llm, :presence_penalty)
   end
 
   defp batch_size do
@@ -314,6 +361,10 @@ defmodule Llm.LlamaServer do
   defp tcp_connect_timeout_ms do
     Application.get_env(:llm, :tcp_connect_timeout_ms, @default_tcp_connect_timeout_ms)
   end
+
+  defp flag_arg(_flag, nil), do: []
+  defp flag_arg(_flag, ""), do: []
+  defp flag_arg(flag, value), do: [flag, to_string(value)]
 
   defp log_server_output(data) do
     data

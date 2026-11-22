@@ -105,7 +105,17 @@ defmodule Llm do
 
   @spec reset_agent_session(String.t()) :: :ok
   def reset_agent_session(cwd) when is_binary(cwd) do
-    OpenCodeACP.reset_session(cwd)
+    case Process.whereis(OpenCodeACP) do
+      nil ->
+        :ok
+
+      server ->
+        try do
+          OpenCodeACP.reset_session(cwd, server)
+        catch
+          :exit, {:noproc, _reason} -> :ok
+        end
+    end
   end
 
   @doc false

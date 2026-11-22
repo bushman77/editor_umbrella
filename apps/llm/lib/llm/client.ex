@@ -1,7 +1,8 @@
 defmodule Llm.Client do
   @moduledoc false
 
-  @chat_max_tokens 8_192
+  @default_model_name "Qwen/Qwen3-4B-Instruct-2507"
+  @default_chat_max_tokens 16_384
 
   @type chat_message :: map()
   @type response_body :: map() | String.t()
@@ -28,6 +29,8 @@ defmodule Llm.Client do
     :top_k,
     :min_p,
     :repeat_penalty,
+    :presence_penalty,
+    :frequency_penalty,
     :seed,
     :stop,
     :response_format
@@ -35,7 +38,7 @@ defmodule Llm.Client do
 
   @spec chat([chat_message()], keyword()) :: {:ok, String.t()} | {:error, term()}
   def chat(messages, opts \\ []) when is_list(messages) and is_list(opts) do
-    max_tokens = Keyword.get(opts, :max_tokens, @chat_max_tokens)
+    max_tokens = Keyword.get(opts, :max_tokens, default_max_tokens())
 
     with {:ok, completion} <- chat_completion(messages, opts) do
       completion_content(completion, max_tokens)
@@ -115,7 +118,7 @@ defmodule Llm.Client do
   end
 
   defp chat_payload(messages, opts) do
-    max_tokens = Keyword.get(opts, :max_tokens, @chat_max_tokens)
+    max_tokens = Keyword.get(opts, :max_tokens, default_max_tokens())
 
     %{
       model: Keyword.get(opts, :model, model_name()),
@@ -130,8 +133,15 @@ defmodule Llm.Client do
 
   defp put_optional_body_opts(payload, opts) do
     Enum.reduce(@optional_body_opts, payload, fn key, acc ->
-      maybe_put(acc, key, Keyword.get(opts, key))
+      maybe_put(acc, key, body_option(opts, key))
     end)
+  end
+
+  defp body_option(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> value
+      :error -> Application.get_env(:llm, key)
+    end
   end
 
   defp put_tools(payload, opts) do
@@ -353,7 +363,11 @@ defmodule Llm.Client do
   defp response_error(_body), do: {:error, :missing_response_content}
 
   defp model_name do
-    Application.get_env(:llm, :model_name, "local-model")
+    Application.get_env(:llm, :model_name, @default_model_name)
+  end
+
+  defp default_max_tokens do
+    Application.get_env(:llm, :max_tokens, @default_chat_max_tokens)
   end
 
   defp base_url do

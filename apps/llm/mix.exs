@@ -25,7 +25,9 @@ defmodule Llm.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
-      {:req, "~> 0.5"}
+      {:req, "~> 0.5"},
+      {:hackney, "~> 4.0", override: true, runtime: false},
+      {:wallaby, "~> 0.31", runtime: false}
     ]
   end
 end

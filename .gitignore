@@ -6,4 +6,6 @@ erl_crash.dump
 *.swp
 *.zip
 .env
+.qwen/.env
+tmp/llm_eval_runs/
 .DS_Store

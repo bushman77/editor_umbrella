@@ -173,21 +173,32 @@ http://127.0.0.1:8000/v1/chat/completions
 
 ## Runtime Configuration
 
-The main config lives in the umbrella `config/config.exs`:
+The main local model config lives in the umbrella `config/llama.exs`, imported by
+`config/config.exs`:
 
 ```elixir
+qwen3_model_name = "Qwen/Qwen3-4B-Instruct-2507"
+
 config :llm,
   enabled: true,
-  model: "~/models/Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf",
+  model_name: qwen3_model_name,
+  alias: qwen3_model_name,
+  model: "/home/default/models/qwen3-4b-instruct-2507/Qwen_Qwen3-4B-Instruct-2507-Q5_K_M.gguf",
   llama_dir: "~/llama.cpp",
   llama_server_path: "build/bin/llama-server",
   host: "127.0.0.1",
   port: 8000,
+  jinja: true,
+  reasoning: "auto",
   flash_attention: "on",
   gpu_layers: "auto",
   parallel_slots: 1,
-  context_size: 32_768,
-  max_tokens: 8_192,
+  context_size: 49_152,
+  max_tokens: 16_384,
+  temperature: 0.7,
+  top_p: 0.8,
+  top_k: 20,
+  min_p: 0.0,
   batch_size: 2_048,
   micro_batch_size: 512,
   startup_wait_ms: 30_000,
@@ -201,7 +212,13 @@ config :llm,
   opencode_cwd: File.cwd!()
 ```
 
-`Llm.LlamaServer` reads its llama.cpp path, bind address, tuning flags, and startup timing from `config :llm`. Paths that can contain `~` are expanded before use.
+`Llm.LlamaServer` reads its llama.cpp path, bind address, Qwen3 chat-template flags,
+sampling defaults, and startup timing from `config :llm`. Paths that can contain
+`~` are expanded before use.
+
+The current GGUF is Qwen3-4B-Instruct-2507. It is a non-thinking Qwen3-Instruct
+model, so the app keeps llama.cpp Jinja chat templating enabled and lets
+`llama-server` detect reasoning mode from the embedded template.
 
 The configured `llama-server` defaults are tuned for local coding work:
 

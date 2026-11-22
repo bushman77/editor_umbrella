@@ -52,7 +52,9 @@ defmodule Editor.Workspaces.Sync do
     {:error, updated, reason}
   end
 
-  defp format_error({:clone_failed, status, output}), do: "clone failed (exit #{status}): #{output}"
+  defp format_error({:clone_failed, status, output}),
+    do: "clone failed (exit #{status}): #{output}"
+
   defp format_error({:pull_failed, status, output}), do: "pull failed (exit #{status}): #{output}"
   defp format_error({:git_error, status, output}), do: "git error (exit #{status}): #{output}"
   defp format_error(:timeout), do: "operation timed out"

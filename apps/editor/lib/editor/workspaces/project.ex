@@ -4,6 +4,7 @@ defmodule Editor.Workspaces.Project do
   import Ecto.Changeset
 
   @types [:git]
+  @type t :: %__MODULE__{}
 
   schema "workspaces_projects" do
     field :name, :string
@@ -18,6 +19,7 @@ defmodule Editor.Workspaces.Project do
     timestamps()
   end
 
+  @spec changeset(t(), map()) :: Ecto.Changeset.t()
   def changeset(project, attrs) do
     project
     |> cast(attrs, [:name, :type, :git_url, :branch, :local_path])
@@ -42,6 +44,7 @@ defmodule Editor.Workspaces.Project do
         name = get_field(changeset, :name) || "workspace"
         slug = slugify(name)
         put_change(changeset, :local_path, Path.join(base_path(), slug))
+
       _ ->
         changeset
     end
@@ -58,8 +61,10 @@ defmodule Editor.Workspaces.Project do
     home = System.get_env("HOME") || System.tmp_dir!()
     Path.join([home, ".editor_umbrella", "workspaces"])
   end
+
   # apps/editor/lib/editor/workspaces/project.ex — add this function
 
+  @spec sync_changeset(t(), map()) :: Ecto.Changeset.t()
   def sync_changeset(project, attrs) do
     project
     |> cast(attrs, [:last_synced_at, :last_sync_status, :last_sync_error])

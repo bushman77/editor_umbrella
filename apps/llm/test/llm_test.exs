@@ -41,6 +41,12 @@ defmodule LlmTest do
     assert Llm.chat("hello") == {:error, :llm_disabled}
   end
 
+  test "reset agent session is quiet when OpenCode ACP is not started" do
+    refute Process.whereis(Llm.OpenCodeACP)
+
+    assert Llm.reset_agent_session(System.tmp_dir!()) == :ok
+  end
+
   test "llama server model path comes from llm config" do
     original_model = Application.get_env(:llm, :model)
     configured_model = "~/models/test-configured-model.gguf"
@@ -71,6 +77,54 @@ defmodule LlmTest do
     Application.put_env(:llm, :port, 9999)
 
     assert Llm.LlamaServer.base_url() == "http://0.0.0.0:9999"
+  end
+
+  test "llama server args use configured Qwen3 chat settings" do
+    original_env =
+      Map.new(
+        [
+          :alias,
+          :model_name,
+          :jinja,
+          :reasoning,
+          :temperature,
+          :top_p,
+          :top_k,
+          :min_p,
+          :max_tokens
+        ],
+        fn key -> {key, Application.fetch_env(:llm, key)} end
+      )
+
+    on_exit(fn ->
+      Enum.each(original_env, fn
+        {key, {:ok, value}} -> Application.put_env(:llm, key, value)
+        {key, :error} -> Application.delete_env(:llm, key)
+      end)
+    end)
+
+    qwen3_model_name = "Qwen/Qwen3-4B-Instruct-2507"
+
+    Application.put_env(:llm, :model_name, qwen3_model_name)
+    Application.put_env(:llm, :alias, qwen3_model_name)
+    Application.put_env(:llm, :jinja, true)
+    Application.put_env(:llm, :reasoning, "auto")
+    Application.put_env(:llm, :temperature, 0.7)
+    Application.put_env(:llm, :top_p, 0.8)
+    Application.put_env(:llm, :top_k, 20)
+    Application.put_env(:llm, :min_p, 0.0)
+    Application.put_env(:llm, :max_tokens, 16_384)
+
+    args = Llm.LlamaServer.server_args()
+
+    assert "--jinja" in args
+    assert option_value(args, "--alias") == qwen3_model_name
+    assert option_value(args, "--reasoning") == "auto"
+    assert option_value(args, "--n-predict") == "16384"
+    assert option_value(args, "--temp") == "0.7"
+    assert option_value(args, "--top-p") == "0.8"
+    assert option_value(args, "--top-k") == "20"
+    assert option_value(args, "--min-p") == "0.0"
   end
 
   test "conversation lists snapshots for a project newest first" do
@@ -112,6 +166,15 @@ defmodule LlmTest do
 
   defp restore_llm_env(key, nil), do: Application.delete_env(:llm, key)
   defp restore_llm_env(key, value), do: Application.put_env(:llm, key, value)
+
+  defp option_value(args, option) do
+    args
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.find_value(fn
+      [^option, value] -> value
+      _other -> nil
+    end)
+  end
 
   test "folder prompts include project paths without file contents" do
     root_path = Path.join(System.tmp_dir!(), "llm-prompt-test-#{System.unique_integer()}")
@@ -344,7 +407,9 @@ defmodule LlmTest do
     ensure_project_memory_cache_started()
     Llm.ProjectMemory.Cache.clear()
 
-    root_path = Path.join(System.tmp_dir!(), "llm-project-memory-cache-test-#{System.unique_integer()}")
+    root_path =
+      Path.join(System.tmp_dir!(), "llm-project-memory-cache-test-#{System.unique_integer()}")
+
     file_path = Path.join([root_path, "lib", "sample.ex"])
 
     File.mkdir_p!(Path.dirname(file_path))
@@ -410,7 +475,11 @@ defmodule LlmTest do
     File.mkdir_p!(Path.dirname(selected_path))
 
     File.write!(selected_path, "defmodule Sample.Selected do\n  def call, do: :selected\nend\n")
-    File.write!(open_path, "defmodule Sample.OpenFile do\n  def helper, do: :open_file_marker\nend\n")
+
+    File.write!(
+      open_path,
+      "defmodule Sample.OpenFile do\n  def helper, do: :open_file_marker\nend\n"
+    )
 
     on_exit(fn -> File.rm_rf!(root_path) end)
 
